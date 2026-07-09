@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     admin_username: str
     admin_password: str
 
+    # Langfuse
+    langfuse_secret_key: str
+    langfuse_public_key: str
+    langfuse_base_url: str = "https://us.cloud.langfuse.com"
+
+    # Lightweight LLM (HyDE + relevancy checks) — Gemini primary, Groq fallback
+    gemini_api_key: str = ""
+    groq_api_key: str = ""
+
     # Logging
     log_level: str = "INFO"
 

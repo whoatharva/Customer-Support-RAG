@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from app.api.dependencies import verify_jwt
+from app.routes.deps import verify_admin as verify_jwt
 from app.schemas import IngestRequest, IngestResponse, IngestionStatusResponse, IngestError
-from app import database
+from app.helpers import database
 from app.pipelines.ingestion.indexer import run_ingestion
-from app.logger import get_logger
+from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])

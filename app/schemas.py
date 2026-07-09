@@ -58,6 +58,7 @@ class Citation(BaseModel):
     source_document: str
     section: str
     text: str
+    score: float = 0.0
 
 
 class ChatResponse(BaseModel):
@@ -65,3 +66,18 @@ class ChatResponse(BaseModel):
     citations: list[Citation]
     confidence: float
     should_escalate: bool = False
+
+
+# ── Auth (extended) ───────────────────────────────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+# ── Chat history ──────────────────────────────────────────────────────────────
+
+class ChatHistoryResponse(BaseModel):
+    session_id: str
+    messages: list[dict]

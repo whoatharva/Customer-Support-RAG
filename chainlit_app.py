@@ -1,17 +1,24 @@
 import os
 import shutil
 import tempfile
+import uuid
 import httpx
 import chainlit as cl
+from dotenv import load_dotenv
+
+load_dotenv()
 
 API_BASE = "http://localhost:8000/api/v1"
 SUPPORTED_EXTENSIONS = {".md", ".pdf", ".docx"}
+INVOICE_EXTENSIONS = {".md"}
+_ADMIN = os.getenv("ADMIN_USERNAME", "admin")
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
 @cl.password_auth_callback
 async def auth_callback(username: str, password: str) -> cl.User | None:
+    username = username.strip()
     async with httpx.AsyncClient() as client:
         try:
             res = await client.post(
@@ -20,15 +27,21 @@ async def auth_callback(username: str, password: str) -> cl.User | None:
             )
             if res.status_code == 200:
                 token = res.json()["access_token"]
-                return cl.User(identifier=username, metadata={"token": token})
-        except Exception:
-            pass
+                role = "admin" if username == _ADMIN else "user"
+                return cl.User(identifier=username, metadata={"token": token, "role": role})
+            print(f"[auth] login failed: status={res.status_code} body={res.text}")
+        except Exception as e:
+            print(f"[auth] exception calling API: {e}")
     return None
 
 
 def get_token() -> str:
+    return cl.user_session.get("user").metadata["token"]
+
+
+def is_admin() -> bool:
     user = cl.user_session.get("user")
-    return user.metadata["token"]
+    return user is not None and user.metadata.get("role") == "admin"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -59,26 +72,100 @@ def format_ingest_result(data: dict) -> str:
     return "\n".join(lines)
 
 
+async def handle_chat_query(text: str):
+    session_id = cl.user_session.get("session_id")
+    invoice_id = cl.user_session.get("invoice_id")
+
+    msg = cl.Message(content="")
+    await msg.send()
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            res = await client.post(
+                f"{API_BASE}/chat/query",
+                json={"session_id": session_id, "query": text, "invoice_id": invoice_id},
+                headers={"Authorization": f"Bearer {get_token()}"},
+            )
+            res.raise_for_status()
+            data = res.json()
+
+        answer = data["answer"]
+        should_escalate = data["should_escalate"]
+        citations = data.get("citations", [])
+
+        lines = [answer, ""]
+        seen: set[str] = set()
+        source_lines: list[str] = []
+        for c in citations:
+            is_invoice = c["source_document"].startswith("INVOICE:")
+            # Always show invoice citations; hide FAQ chunks below relevance threshold
+            if not is_invoice and c.get("score", 0) < 0.45:
+                continue
+            key = f"{c['source_document']} / {c['section']}"
+            if key not in seen:
+                seen.add(key)
+                source_lines.append(f"- `{c['source_document']}` — {c['section']}")
+        if source_lines:
+            lines.append("**Sources:**")
+            lines.extend(source_lines)
+        if should_escalate:
+            lines.append(
+                "\n> ⚠️ I'm not fully confident in this answer — please verify with "
+                "**support@ourstore.com** or live chat (Mon–Sat, 9am–8pm IST)."
+            )
+
+        msg.content = "\n".join(lines)
+        await msg.update()
+
+    except httpx.HTTPStatusError as e:
+        msg.content = f"API error {e.response.status_code}: {e.response.text}"
+        await msg.update()
+    except Exception as e:
+        msg.content = f"Error: {e}"
+        await msg.update()
+
+
 # ── Chat start ────────────────────────────────────────────────────────────────
 
 @cl.on_chat_start
 async def start():
-    cl.user_session.set("browse_path", os.path.expanduser("~"))
-    await cl.Message(
-        content=(
-            "**Customer Support RAG — Admin UI**\n\n"
-            "**Options:**\n"
-            "- Drag & drop `.md`, `.pdf`, or `.docx` files to ingest them\n"
-            "- `/browse` — open folder browser to pick a folder\n"
-            "- `/ingest <path>` — ingest a folder by path directly\n"
-            "- `/status` — view last ingestion runs\n"
-        )
-    ).send()
+    cl.user_session.set("session_id", str(uuid.uuid4()))
+    cl.user_session.set("invoice_id", None)
+
+    if is_admin():
+        cl.user_session.set("browse_path", os.path.expanduser("~"))
+        await cl.Message(
+            content=(
+                "**Customer Support RAG — Admin**\n\n"
+                "**Chat:** Type any question to query the knowledge base.\n\n"
+                "**Ingestion commands:**\n"
+                "- Drag & drop `.md`, `.pdf`, or `.docx` files to ingest them\n"
+                "- `/browse` — open folder browser to pick a folder\n"
+                "- `/ingest <path>` — ingest a folder by path directly\n"
+                "- `/status` — view last ingestion runs\n"
+            )
+        ).send()
+    else:
+        await cl.Message(
+            content=(
+                "**Customer Support**\n\n"
+                "Hi! How can I help you today?\n\n"
+                "You can upload your **invoice** (`.md` file) to get help with a specific order, "
+                "or just type your question directly."
+            )
+        ).send()
 
 
 # ── File upload (drag & drop) ─────────────────────────────────────────────────
 
 async def handle_file_upload(message: cl.Message):
+    if is_admin():
+        await _handle_admin_upload(message)
+    else:
+        await _handle_user_invoice_upload(message)
+
+
+async def _handle_admin_upload(message: cl.Message):
     files = [e for e in message.elements if hasattr(e, "path") and
              os.path.splitext(e.name)[1].lower() in SUPPORTED_EXTENSIONS]
 
@@ -95,7 +182,6 @@ async def handle_file_upload(message: cl.Message):
     try:
         for f in files:
             shutil.copy(f.path, os.path.join(tmp_dir, f.name))
-
         data = await call_ingest(tmp_dir)
         msg.content = format_ingest_result(data)
         await msg.update()
@@ -109,7 +195,41 @@ async def handle_file_upload(message: cl.Message):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-# ── Folder browser ────────────────────────────────────────────────────────────
+async def _handle_user_invoice_upload(message: cl.Message):
+    invoices = [e for e in message.elements if hasattr(e, "path") and
+                os.path.splitext(e.name)[1].lower() in INVOICE_EXTENSIONS]
+
+    if not invoices:
+        await cl.Message(
+            content="Please upload your invoice as a `.md` file."
+        ).send()
+        return
+
+    f = invoices[-1]
+    invoice_id = os.path.splitext(f.name)[0]   # e.g. INV-2026-0001
+    user_email = cl.user_session.get("user").identifier
+
+    # Security check: invoice must exist in this user's own subfolder.
+    # Invoices are stored at data/invoices/{user_email}/{invoice_id}.md so a
+    # user cannot access another person's order by uploading a guessed filename.
+    _BASE = os.path.join(os.path.dirname(__file__), "data", "invoices")
+    invoice_path = os.path.join(_BASE, user_email, f.name)
+    if not os.path.exists(invoice_path):
+        await cl.Message(
+            content=(
+                f"⚠️ Invoice **{invoice_id}** is not associated with your account. "
+                "Please upload one of your own invoices."
+            )
+        ).send()
+        return
+
+    cl.user_session.set("invoice_id", invoice_id)
+    await cl.Message(
+        content=f"Invoice **{invoice_id}** loaded. You can now ask me about your order."
+    ).send()
+
+
+# ── Folder browser (admin only) ───────────────────────────────────────────────
 
 async def show_folder_browser(path: str):
     cl.user_session.set("browse_path", path)
@@ -122,7 +242,6 @@ async def show_folder_browser(path: str):
 
     actions = []
 
-    # Parent directory
     parent = os.path.dirname(path)
     if parent != path:
         actions.append(cl.Action(name="browse_up", value=parent, label=".. (go up)"))
@@ -141,7 +260,6 @@ async def show_folder_browser(path: str):
                 label=f"📄 {entry.name}",
             ))
 
-    # Ingest current folder action
     actions.append(cl.Action(
         name="browse_ingest",
         value=path,
@@ -194,13 +312,17 @@ async def on_browse_ingest(action: cl.Action):
 
 @cl.on_message
 async def on_message(message: cl.Message):
-    # File upload via drag & drop
     if message.elements:
         await handle_file_upload(message)
         return
 
     text = message.content.strip()
 
+    if not is_admin():
+        await handle_chat_query(text)
+        return
+
+    # Admin-only commands
     if text == "/browse":
         current = cl.user_session.get("browse_path") or os.path.expanduser("~")
         await show_folder_browser(current)
@@ -261,6 +383,4 @@ async def on_message(message: cl.Message):
             await msg.update()
 
     else:
-        await cl.Message(
-            content="Pipeline 2 & 3 not implemented yet.\n\nTry:\n- `/browse` — folder browser\n- `/ingest <path>` — ingest by path\n- `/status` — ingestion history\n- Or drag & drop files here"
-        ).send()
+        await handle_chat_query(text)

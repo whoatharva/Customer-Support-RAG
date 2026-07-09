@@ -15,7 +15,9 @@ wheels/
 # Chainlit runtime artifacts
 .chainlit/
 .files/
-
+data/
 # Markdown (keep README)
-*.md
-!README.md
+Project-idea.md
+tests.md
+creds.md
+chainlit.md
