@@ -1,7 +1,7 @@
 from openai import AzureOpenAI
 from app.config import settings
 from app.pipelines.ingestion.chunker import Chunk
-from app.logger import get_logger
+from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
 BATCH_SIZE = 100

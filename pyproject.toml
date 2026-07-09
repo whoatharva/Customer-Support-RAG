@@ -18,6 +18,9 @@ dependencies = [
     "supabase>=2.15.2",
     "python-dotenv>=1.1.0",
     "pydantic-settings>=2.9.0",
-    "passlib[bcrypt]>=1.7.4",
+    "bcrypt>=4.0.0",
     "chainlit>=2.11.1",
+    "langfuse>=2.0.0,<3.0.0",
+    "google-genai>=1.0.0",
+    "groq>=0.9.0",
 ]

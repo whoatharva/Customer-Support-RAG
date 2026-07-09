@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from app.pipelines.ingestion.loader import RawDocument
-from app.logger import get_logger
+from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
 

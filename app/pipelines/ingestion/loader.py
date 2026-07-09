@@ -1,7 +1,7 @@
 import hashlib
 from pathlib import Path
 from dataclasses import dataclass
-from app.logger import get_logger
+from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
 SUPPORTED_EXTENSIONS = {".md", ".pdf", ".docx"}

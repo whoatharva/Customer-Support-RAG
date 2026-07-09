@@ -1,7 +1,7 @@
 from fastapi import FastAPI, status
-from app.api.routes import auth, admin, chat
+from app.routes import auth, admin, chat
 from app.config import settings
-from app.logger import configure_logging, get_logger
+from app.helpers.logger import configure_logging, get_logger
 
 logger = get_logger(__name__)
 

@@ -1,0 +1,70 @@
+"""HyDE Lite — Hypothetical Document Embeddings (lightweight version).
+
+WHAT IS HyDE?
+  Normal RAG embeds the user's question and searches for similar chunks.
+  Problem: a short question like "warranty on my laptop?" has a very different
+  embedding than the FAQ answer it's looking for.
+
+  HyDE fixes this by:
+    1. Asking a lightweight LLM "what would a good answer to this question look like?"
+    2. Embedding THAT hypothetical answer instead of (or alongside) the question
+    3. The hypothetical answer embedding lives in the same semantic space as real answers
+
+WHY "LITE"?
+  Full HyDE generates a whole paragraph. We generate only 2 sentences using a cheap
+  model (Gemini / Groq) — fast enough to add < 300 ms to the pipeline.
+
+HOW WE BLEND:
+  final_vector = 0.7 * query_vector + 0.3 * hyde_vector  (then normalise)
+  Keeps the original query intent dominant while shifting toward answer-space.
+"""
+
+from app.llm import client as llm
+from app.llm import lightweight
+from app.helpers.logger import get_logger
+
+logger = get_logger(__name__)
+
+_HYDE_PROMPT = """You are a customer support assistant. Write a SHORT 2-sentence answer
+to the following question, as if you had access to all order and policy information.
+Be specific and factual. Do NOT say "I don't know".
+
+Question: {query}
+
+Answer (2 sentences max):""".strip()
+
+
+def get_blended_vector(query: str) -> list[float]:
+    """
+    Returns a blended embedding vector:
+      70% from the original query
+      30% from a hypothetical answer to that query
+
+    Falls back to plain query embedding if HyDE generation fails.
+    """
+    # Step 1: embed the original query (always happens)
+    query_vector = llm.embed([query])[0]
+    logger.debug("HyDE: query embedded (dim=%d)", len(query_vector))
+
+    # Step 2: generate a hypothetical answer via lightweight LLM
+    prompt = _HYDE_PROMPT.format(query=query)
+    hypothetical_answer = lightweight.call(prompt, max_tokens=120)
+
+    if not hypothetical_answer:
+        logger.warning("HyDE: hypothetical answer generation failed — using plain query vector")
+        return query_vector
+
+    logger.debug("HyDE: hypothetical answer = %r", hypothetical_answer[:80])
+
+    # Step 3: embed the hypothetical answer
+    hyde_vector = llm.embed([hypothetical_answer])[0]
+
+    # Step 4: blend (70% query + 30% hypothetical) and normalise
+    blended = [0.7 * q + 0.3 * h for q, h in zip(query_vector, hyde_vector)]
+    magnitude = sum(x * x for x in blended) ** 0.5
+    if magnitude == 0:
+        return query_vector
+    normalised = [x / magnitude for x in blended]
+
+    logger.debug("HyDE: blended vector produced (70%% query + 30%% hypothetical)")
+    return normalised

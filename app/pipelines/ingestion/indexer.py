@@ -4,12 +4,12 @@ from datetime import datetime, timezone
 
 from qdrant_client.models import PointStruct
 
-from app import database
-from app.vector_store import store as vector_store
+from app.helpers import database
+from app.vectorstore import store as vector_store
 from app.pipelines.ingestion.loader import load_documents
 from app.pipelines.ingestion.chunker import chunk_document
 from app.pipelines.ingestion.embedder import embed_chunks
-from app.logger import get_logger
+from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
 

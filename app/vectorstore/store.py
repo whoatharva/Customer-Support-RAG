@@ -1,7 +1,7 @@
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, ScoredPoint
+from qdrant_client.models import Distance, VectorParams, PointStruct, ScoredPoint, QueryResponse
 from app.config import settings
-from app.logger import get_logger
+from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
 _client: QdrantClient | None = None
@@ -37,18 +37,16 @@ def upsert_points(points: list[PointStruct]):
         raise
 
 
-def search(query_vector: list[float], top_k: int = 5, filters: dict | None = None) -> list[ScoredPoint]:
-    # Pipeline 3: semantic search over the collection
-    # filters: optional Qdrant payload filters (e.g. {"doc_filename": "faq_returns.md"})
+def search(query_vector: list[float], top_k: int = 5, filters: dict | None = None) -> list[QueryResponse]:
     logger.debug("search: top_k=%d filters=%s", top_k, filters)
     try:
-        return get_qdrant().search(
+        return get_qdrant().query_points(
             collection_name=settings.qdrant_collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=top_k,
             query_filter=filters,
             with_payload=True,
-        )
+        ).points
     except Exception:
         logger.error("search failed: top_k=%d", top_k, exc_info=True)
         raise
