@@ -18,7 +18,7 @@ cl_data._data_layer = SupabaseDataLayer()
 
 API_BASE = "http://localhost:8000/api/v1"
 SUPPORTED_EXTENSIONS = {".md", ".pdf", ".docx"}
-INVOICE_EXTENSIONS = {".md"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def _mint_jwt(subject: str) -> str:
@@ -93,7 +93,6 @@ def format_ingest_result(data: dict) -> str:
 
 async def handle_chat_query(text: str):
     session_id = cl.user_session.get("session_id")
-    invoice_ids = cl.user_session.get("invoice_ids") or []
 
     msg = cl.Message(content="")
     await msg.send()
@@ -102,7 +101,7 @@ async def handle_chat_query(text: str):
         async with httpx.AsyncClient(timeout=60) as client:
             res = await client.post(
                 f"{API_BASE}/chat/query",
-                json={"session_id": session_id, "query": text, "invoice_ids": invoice_ids or None},
+                json={"session_id": session_id, "query": text},
                 headers={"Authorization": f"Bearer {get_token()}"},
             )
             res.raise_for_status()
@@ -120,10 +119,10 @@ async def handle_chat_query(text: str):
             # Always show invoice citations; hide FAQ chunks below relevance threshold
             if not is_invoice and c.get("score", 0) < 0.45:
                 continue
-            key = f"{c['source_document']} / {c['section']}"
+            key = c["source_document"]
             if key not in seen:
                 seen.add(key)
-                source_lines.append(f"- `{c['source_document']}` — {c['section']}")
+                source_lines.append(f"- `{c['source_document']}`")
         if source_lines:
             lines.append("**Sources:**")
             lines.extend(source_lines)
@@ -132,6 +131,12 @@ async def handle_chat_query(text: str):
 
         msg.content = "\n".join(lines)
         await msg.update()
+
+        # Auto-name the thread after the first message
+        if not cl.user_session.get("thread_named"):
+            thread_name = text[:60].strip()
+            await cl.context.emitter.update_thread(name=thread_name)
+            cl.user_session.set("thread_named", True)
 
     except httpx.HTTPStatusError as e:
         msg.content = f"API error {e.response.status_code}: {e.response.text}"
@@ -145,8 +150,11 @@ async def handle_chat_query(text: str):
 
 @cl.on_chat_start
 async def start():
-    cl.user_session.set("session_id", str(uuid.uuid4()))
-    cl.user_session.set("invoice_ids", [])
+    session_id = str(uuid.uuid4())
+    cl.user_session.set("session_id", session_id)
+    cl.user_session.set("thread_named", False)
+    # Persist session_id so on_chat_resume can restore it
+    await cl.context.emitter.update_thread(metadata={"session_id": session_id})
 
     if is_admin():
         cl.user_session.set("browse_path", os.path.expanduser("~"))
@@ -166,10 +174,18 @@ async def start():
             content=(
                 "**Customer Support**\n\n"
                 "Hi! How can I help you today?\n\n"
-                "You can upload your **invoice** (`.md` file) to get help with a specific order, "
-                "or just type your question directly."
+                "Type your question directly, or upload a photo of your product/package "
+                "if you need help with a delivery or product issue."
             )
         ).send()
+
+
+@cl.on_chat_resume
+async def resume(thread: dict):
+    metadata = thread.get("metadata") or {}
+    session_id = metadata.get("session_id") or str(uuid.uuid4())
+    cl.user_session.set("session_id", session_id)
+    cl.user_session.set("thread_named", True)  # already named, don't overwrite
 
 
 # ── File upload (drag & drop) ─────────────────────────────────────────────────
@@ -178,7 +194,7 @@ async def handle_file_upload(message: cl.Message):
     if is_admin():
         await _handle_admin_upload(message)
     else:
-        await _handle_user_invoice_upload(message)
+        await _handle_user_image_upload(message)
 
 
 async def _handle_admin_upload(message: cl.Message):
@@ -211,42 +227,48 @@ async def _handle_admin_upload(message: cl.Message):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-async def _handle_user_invoice_upload(message: cl.Message):
-    invoices = [e for e in message.elements if hasattr(e, "path") and
-                os.path.splitext(e.name)[1].lower() in INVOICE_EXTENSIONS]
+async def _handle_user_image_upload(message: cl.Message):
+    images = [e for e in message.elements if hasattr(e, "path") and
+              os.path.splitext(e.name)[1].lower() in IMAGE_EXTENSIONS]
 
-    if not invoices:
+    if not images:
         await cl.Message(
-            content="Please upload your invoice as a `.md` file."
+            content="I can analyze product/package photos (`.jpg`, `.png`, `.webp`). "
+                    "Just upload a clear photo and I'll check for issues."
         ).send()
         return
 
-    user_email = cl.user_session.get("user").identifier
-    _BASE = os.path.join(os.path.dirname(__file__), "data", "invoices")
-    active_ids: list[str] = list(cl.user_session.get("invoice_ids") or [])
+    session_id = cl.user_session.get("session_id")
+    msg = cl.Message(content="Analyzing your image...")
+    await msg.send()
 
-    for f in invoices:
-        invoice_id = os.path.splitext(f.name)[0]
-        invoice_path = os.path.join(_BASE, user_email, f.name)
-        if not os.path.exists(invoice_path):
-            await cl.Message(
-                content=(
-                    f"⚠️ Invoice **{invoice_id}** is not associated with your account. "
-                    "Please upload one of your own invoices."
+    f = images[0]
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            with open(f.path, "rb") as img_file:
+                res = await client.post(
+                    f"{API_BASE}/chat/analyze-image",
+                    data={"session_id": session_id},
+                    files={"file": (f.name, img_file, _mime_type(f.name))},
+                    headers={"Authorization": f"Bearer {get_token()}"},
                 )
-            ).send()
-            continue
-        if invoice_id not in active_ids:
-            active_ids.append(invoice_id)
+                res.raise_for_status()
+                data = res.json()
 
-    if not active_ids:
-        return
+        msg.content = data["follow_up_message"]
+        await msg.update()
 
-    cl.user_session.set("invoice_ids", active_ids)
-    ids_str = ", ".join(f"**{i}**" for i in active_ids)
-    await cl.Message(
-        content=f"Active invoices: {ids_str}. You can now ask me about your orders."
-    ).send()
+    except httpx.HTTPStatusError as e:
+        msg.content = f"Image analysis failed ({e.response.status_code}): {e.response.text}"
+        await msg.update()
+    except Exception as e:
+        msg.content = f"Error analyzing image: {e}"
+        await msg.update()
+
+
+def _mime_type(filename: str) -> str:
+    ext = os.path.splitext(filename)[1].lower()
+    return {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext.lstrip("."), "image/jpeg")
 
 
 # ── Folder browser (admin only) ───────────────────────────────────────────────

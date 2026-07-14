@@ -98,16 +98,60 @@ class SupabaseDataLayer(BaseDataLayer):
     async def delete_feedback(self, feedback_id: str) -> bool:
         return True
 
-    # ── Elements (file attachments) — stubbed ─────────────────────────────────
+    # ── Elements (file attachments) ───────────────────────────────────────────
 
     async def create_element(self, element) -> None:
-        pass
+        try:
+            await _run(lambda: get_db().table("cl_elements").upsert({
+                "id": element.id,
+                "thread_id": element.thread_id,
+                "type": getattr(element, "type", "file"),
+                "name": element.name or "",
+                "mime": element.mime or "",
+                "url": element.url or "",
+                "object_key": element.object_key or "",
+                "display": element.display or "inline",
+                "size": element.size,
+                "language": element.language or "",
+                "for_id": element.for_id or "",
+                "created_at": _now(),
+            }, on_conflict="id").execute())
+        except Exception:
+            logger.warning("create_element failed: %s", element.id, exc_info=True)
 
     async def get_element(self, thread_id: str, element_id: str):
+        try:
+            result = await _run(
+                lambda: get_db().table("cl_elements").select("*")
+                    .eq("id", element_id).eq("thread_id", thread_id).limit(1).execute()
+            )
+            if result.data:
+                r = result.data[0]
+                return {
+                    "id": r["id"],
+                    "threadId": r["thread_id"],
+                    "type": r.get("type", "file"),
+                    "name": r.get("name", ""),
+                    "mime": r.get("mime", ""),
+                    "url": r.get("url", ""),
+                    "objectKey": r.get("object_key", ""),
+                    "display": r.get("display", "inline"),
+                    "size": r.get("size"),
+                    "language": r.get("language", ""),
+                    "forId": r.get("for_id", ""),
+                }
+        except Exception:
+            logger.debug("get_element failed: %s / %s", thread_id, element_id, exc_info=True)
         return None
 
     async def delete_element(self, element_id: str, thread_id: Optional[str] = None) -> None:
-        pass
+        try:
+            q = get_db().table("cl_elements").delete().eq("id", element_id)
+            if thread_id:
+                q = q.eq("thread_id", thread_id)
+            await _run(lambda: q.execute())
+        except Exception:
+            logger.debug("delete_element failed: %s", element_id, exc_info=True)
 
     # ── Steps (individual messages) ───────────────────────────────────────────
 

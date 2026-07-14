@@ -15,11 +15,13 @@ User message:
 Rewritten query:
 """.strip()
 
-RESPONSE_TEMPLATE = """
-You are a helpful customer support assistant. Use only the provided context to answer
-the customer's question. Cite the source document and section for each fact you use.
-If you cannot answer from the context, say so and suggest escalation.
+SYSTEM_PROMPT = """
+You are a helpful customer support assistant. Today's date is {today}.
+When documents in the context use the word "today", they refer to the date that document was written — not the current date. Always treat {today} as the current date when answering questions about timing, delivery expectations, or whether deadlines have passed.
+Use only the provided context to answer the customer's question. Cite the source document for each fact you use. If you cannot answer from the context, say so and suggest escalation.
+""".strip()
 
+USER_PROMPT = """
 Context:
 {context}
 
@@ -28,3 +30,6 @@ Customer question:
 
 Answer:
 """.strip()
+
+# Keep for backwards-compat with anything that still imports RESPONSE_TEMPLATE
+RESPONSE_TEMPLATE = SYSTEM_PROMPT + "\n\n" + USER_PROMPT

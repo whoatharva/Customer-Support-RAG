@@ -138,3 +138,37 @@ def delete_chat_session(session_id: str):
     # chat_messages rows cascade-delete via FK
     get_db().table("chat_sessions").delete().eq("id", session_id).execute()
     logger.info("chat session deleted: %s", session_id)
+
+
+# ── Invoices ──────────────────────────────────────────────────────────────────
+
+def upsert_invoice(invoice_id: str, user_email: str, order_id: str | None, content: str):
+    get_db().table("invoices").upsert({
+        "invoice_id": invoice_id,
+        "user_email": user_email,
+        "order_id": order_id,
+        "content": content,
+    }, on_conflict="invoice_id").execute()
+    logger.debug("invoice upserted: %s / %s", user_email, invoice_id)
+
+
+def get_invoices_for_user(email: str) -> list[dict]:
+    result = (
+        get_db().table("invoices")
+        .select("invoice_id, order_id, content")
+        .eq("user_email", email)
+        .execute()
+    )
+    return result.data or []
+
+
+def get_invoice_by_id(invoice_id: str, email: str) -> dict | None:
+    result = (
+        get_db().table("invoices")
+        .select("invoice_id, order_id, content")
+        .eq("invoice_id", invoice_id)
+        .eq("user_email", email)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
