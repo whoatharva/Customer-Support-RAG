@@ -21,6 +21,7 @@ HOW WE BLEND:
 
 from app.llm import client as llm
 from app.llm import lightweight
+from app.config import settings
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
@@ -59,12 +60,12 @@ def get_blended_vector(query: str) -> list[float]:
     # Step 3: embed the hypothetical answer
     hyde_vector = llm.embed([hypothetical_answer])[0]
 
-    # Step 4: blend (70% query + 30% hypothetical) and normalise
-    blended = [0.7 * q + 0.3 * h for q, h in zip(query_vector, hyde_vector)]
+    # Step 4: blend and normalise
+    blended = [settings.hyde_query_weight * q + settings.hyde_vector_weight * h for q, h in zip(query_vector, hyde_vector)]
     magnitude = sum(x * x for x in blended) ** 0.5
     if magnitude == 0:
         return query_vector
     normalised = [x / magnitude for x in blended]
 
-    logger.debug("HyDE: blended vector produced (70%% query + 30%% hypothetical)")
+    logger.debug("HyDE: blended vector produced (%.0f%% query + %.0f%% hypothetical)", settings.hyde_query_weight * 100, settings.hyde_vector_weight * 100)
     return normalised

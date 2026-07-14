@@ -12,11 +12,15 @@ Tables managed here:
 
 """
 
-import httpx
-from datetime import datetime
-from supabase import create_client, Client, ClientOptions
+import os
+from datetime import datetime, timezone
+from supabase import create_client, Client
 from app.config import settings
 from app.helpers.logger import get_logger
+
+# certifi's bundle is missing the CA that signs Supabase's cert on this machine;
+# the system bundle has it, so point all httpx/ssl calls there.
+os.environ.setdefault("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
 
 logger = get_logger(__name__)
 _client: Client | None = None
@@ -25,11 +29,7 @@ _client: Client | None = None
 def get_db() -> Client:
     global _client
     if _client is None:
-        _client = create_client(
-            settings.supabase_url,
-            settings.supabase_key,
-            options=ClientOptions(httpx_client=httpx.Client(verify=False)),
-        )
+        _client = create_client(settings.supabase_url, settings.supabase_key)
         logger.info("Supabase client initialized")
     return _client
 
@@ -55,7 +55,7 @@ def upsert_document(filename: str, filepath: str, content_hash: str, doc_type: s
             "doc_type": doc_type,
             "chunk_count": chunk_count,
             "status": status,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }, on_conflict="filename").execute()
     except Exception:
         logger.error("failed to upsert document: %s", filename, exc_info=True)
@@ -106,7 +106,7 @@ def get_user_by_email(email: str) -> dict | None:
 def ensure_chat_session(session_id: str, user_email: str):
     """Create session row if it doesn't exist; update updated_at if it does."""
     get_db().table("chat_sessions").upsert(
-        {"id": session_id, "user_email": user_email, "updated_at": datetime.utcnow().isoformat()},
+        {"id": session_id, "user_email": user_email, "updated_at": datetime.now(timezone.utc).isoformat()},
         on_conflict="id",
     ).execute()
     logger.debug("chat session ensured: %s", session_id)

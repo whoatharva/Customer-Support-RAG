@@ -30,13 +30,13 @@ def embed(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
-def chat(messages: list[dict], tools: list[dict] | None = None) -> dict:
+def chat(messages: list[dict]) -> dict:
     """Call the chat completion model. Returns the full response as a dict."""
-    logger.debug("chat call: %d message(s), tools=%s", len(messages), bool(tools))
-    kwargs = dict(model=settings.azure_openai_deployment_name, messages=messages)
-    if tools:
-        kwargs["tools"] = tools
-    response = _get_client().chat.completions.create(**kwargs)
+    logger.debug("chat call: %d message(s)", len(messages))
+    response = _get_client().chat.completions.create(
+        model=settings.azure_openai_deployment_name,
+        messages=messages,
+    )
     result = response.model_dump()
     usage = result.get("usage", {})
     logger.debug(

@@ -1,5 +1,7 @@
 # Prompt templates for Pipeline 2 (query rewrite) and Pipeline 3 (response generation).
 
+SUPPORT_CONTACT = "support@ourstore.com or use the live chat (Mon–Sat, 9am–8pm IST)"
+
 QUERY_REWRITE_TEMPLATE = """
 Given the conversation history and the latest user message, rewrite the user's question
 as a fully self-contained query suitable for semantic search. Resolve pronouns and ellipsis.

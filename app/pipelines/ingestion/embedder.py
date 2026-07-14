@@ -4,8 +4,6 @@ from app.pipelines.ingestion.chunker import Chunk
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
-BATCH_SIZE = 100
-
 _client: AzureOpenAI | None = None
 
 
@@ -24,10 +22,11 @@ def get_embedding_client() -> AzureOpenAI:
 def embed_chunks(chunks: list[Chunk]) -> list[tuple[Chunk, list[float]]]:
     client = get_embedding_client()
     results = []
-    total_batches = (len(chunks) + BATCH_SIZE - 1) // BATCH_SIZE
+    batch_size = settings.embedding_batch_size
+    total_batches = (len(chunks) + batch_size - 1) // batch_size
 
-    for batch_idx, i in enumerate(range(0, len(chunks), BATCH_SIZE)):
-        batch = chunks[i : i + BATCH_SIZE]
+    for batch_idx, i in enumerate(range(0, len(chunks), batch_size)):
+        batch = chunks[i : i + batch_size]
         logger.info("embedding batch %d/%d (%d chunks)", batch_idx + 1, total_batches, len(batch))
         try:
             response = client.embeddings.create(

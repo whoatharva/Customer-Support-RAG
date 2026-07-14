@@ -2,16 +2,28 @@ import os
 import shutil
 import tempfile
 import uuid
+from datetime import datetime, timedelta, timezone
 import httpx
+from jose import jwt
 import chainlit as cl
+import chainlit.data as cl_data
 from dotenv import load_dotenv
+from app.llm.prompts import SUPPORT_CONTACT
+from app.chainlit_data_layer import SupabaseDataLayer
+from app.config import settings
 
 load_dotenv()
+
+cl_data._data_layer = SupabaseDataLayer()
 
 API_BASE = "http://localhost:8000/api/v1"
 SUPPORTED_EXTENSIONS = {".md", ".pdf", ".docx"}
 INVOICE_EXTENSIONS = {".md"}
-_ADMIN = os.getenv("ADMIN_USERNAME", "admin")
+
+
+def _mint_jwt(subject: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expiry_minutes)
+    return jwt.encode({"sub": subject, "exp": expire}, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -19,16 +31,23 @@ _ADMIN = os.getenv("ADMIN_USERNAME", "admin")
 @cl.password_auth_callback
 async def auth_callback(username: str, password: str) -> cl.User | None:
     username = username.strip()
+
+    # Admin login — validated locally against config, then mint a JWT for API calls
+    if username == settings.admin_username:
+        if password == settings.admin_password:
+            token = _mint_jwt(settings.admin_username)
+            return cl.User(identifier=username, metadata={"token": token, "role": "admin"})
+        return None
+
     async with httpx.AsyncClient() as client:
         try:
             res = await client.post(
                 f"{API_BASE}/auth/login",
-                json={"username": username, "password": password},
+                json={"email": username, "password": password},
             )
             if res.status_code == 200:
                 token = res.json()["access_token"]
-                role = "admin" if username == _ADMIN else "user"
-                return cl.User(identifier=username, metadata={"token": token, "role": role})
+                return cl.User(identifier=username, metadata={"token": token, "role": "user"})
             print(f"[auth] login failed: status={res.status_code} body={res.text}")
         except Exception as e:
             print(f"[auth] exception calling API: {e}")
@@ -36,7 +55,7 @@ async def auth_callback(username: str, password: str) -> cl.User | None:
 
 
 def get_token() -> str:
-    return cl.user_session.get("user").metadata["token"]
+    return cl.user_session.get("user").metadata.get("token", "")
 
 
 def is_admin() -> bool:
@@ -74,7 +93,7 @@ def format_ingest_result(data: dict) -> str:
 
 async def handle_chat_query(text: str):
     session_id = cl.user_session.get("session_id")
-    invoice_id = cl.user_session.get("invoice_id")
+    invoice_ids = cl.user_session.get("invoice_ids") or []
 
     msg = cl.Message(content="")
     await msg.send()
@@ -83,7 +102,7 @@ async def handle_chat_query(text: str):
         async with httpx.AsyncClient(timeout=60) as client:
             res = await client.post(
                 f"{API_BASE}/chat/query",
-                json={"session_id": session_id, "query": text, "invoice_id": invoice_id},
+                json={"session_id": session_id, "query": text, "invoice_ids": invoice_ids or None},
                 headers={"Authorization": f"Bearer {get_token()}"},
             )
             res.raise_for_status()
@@ -109,10 +128,7 @@ async def handle_chat_query(text: str):
             lines.append("**Sources:**")
             lines.extend(source_lines)
         if should_escalate:
-            lines.append(
-                "\n> ⚠️ I'm not fully confident in this answer — please verify with "
-                "**support@ourstore.com** or live chat (Mon–Sat, 9am–8pm IST)."
-            )
+            lines.append(f"\n> ⚠️ I'm not fully confident in this answer — please verify with **{SUPPORT_CONTACT}**.")
 
         msg.content = "\n".join(lines)
         await msg.update()
@@ -130,7 +146,7 @@ async def handle_chat_query(text: str):
 @cl.on_chat_start
 async def start():
     cl.user_session.set("session_id", str(uuid.uuid4()))
-    cl.user_session.set("invoice_id", None)
+    cl.user_session.set("invoice_ids", [])
 
     if is_admin():
         cl.user_session.set("browse_path", os.path.expanduser("~"))
@@ -205,27 +221,31 @@ async def _handle_user_invoice_upload(message: cl.Message):
         ).send()
         return
 
-    f = invoices[-1]
-    invoice_id = os.path.splitext(f.name)[0]   # e.g. INV-2026-0001
     user_email = cl.user_session.get("user").identifier
-
-    # Security check: invoice must exist in this user's own subfolder.
-    # Invoices are stored at data/invoices/{user_email}/{invoice_id}.md so a
-    # user cannot access another person's order by uploading a guessed filename.
     _BASE = os.path.join(os.path.dirname(__file__), "data", "invoices")
-    invoice_path = os.path.join(_BASE, user_email, f.name)
-    if not os.path.exists(invoice_path):
-        await cl.Message(
-            content=(
-                f"⚠️ Invoice **{invoice_id}** is not associated with your account. "
-                "Please upload one of your own invoices."
-            )
-        ).send()
+    active_ids: list[str] = list(cl.user_session.get("invoice_ids") or [])
+
+    for f in invoices:
+        invoice_id = os.path.splitext(f.name)[0]
+        invoice_path = os.path.join(_BASE, user_email, f.name)
+        if not os.path.exists(invoice_path):
+            await cl.Message(
+                content=(
+                    f"⚠️ Invoice **{invoice_id}** is not associated with your account. "
+                    "Please upload one of your own invoices."
+                )
+            ).send()
+            continue
+        if invoice_id not in active_ids:
+            active_ids.append(invoice_id)
+
+    if not active_ids:
         return
 
-    cl.user_session.set("invoice_id", invoice_id)
+    cl.user_session.set("invoice_ids", active_ids)
+    ids_str = ", ".join(f"**{i}**" for i in active_ids)
     await cl.Message(
-        content=f"Invoice **{invoice_id}** loaded. You can now ask me about your order."
+        content=f"Active invoices: {ids_str}. You can now ask me about your orders."
     ).send()
 
 

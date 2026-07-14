@@ -1,7 +1,7 @@
 """Lightweight LLM client for cheap, fast operations (HyDE generation, relevancy checks).
 
 Strategy:
-  Primary  — Google Gemini (gemini-1.5-flash): fast and cheap
+  Primary  — Google Gemini (gemini-2.0-flash): fast and cheap
   Fallback — Groq (llama-3.1-8b-instant): free tier, very fast inference
 
 These are used only for:

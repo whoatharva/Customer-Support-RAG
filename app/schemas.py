@@ -2,18 +2,20 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 
+from app.config import settings
+
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
-    username: str
+    email: str
     password: str
 
 
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    expires_in: int = 1800
+    expires_in: int = settings.jwt_expiry_minutes * 60
 
 
 # ── Ingestion (Pipeline 1) ────────────────────────────────────────────────────
@@ -50,7 +52,7 @@ class IngestionStatusResponse(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str
     query: str
-    invoice_id: Optional[str] = None
+    invoice_ids: Optional[list[str]] = None
 
 
 class Citation(BaseModel):
@@ -66,6 +68,7 @@ class ChatResponse(BaseModel):
     citations: list[Citation]
     confidence: float
     should_escalate: bool = False
+    total_tokens: int | None = None
 
 
 # ── Auth (extended) ───────────────────────────────────────────────────────────
