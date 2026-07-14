@@ -52,7 +52,6 @@ class IngestionStatusResponse(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str
     query: str
-    invoice_ids: Optional[list[str]] = None
 
 
 class Citation(BaseModel):
@@ -84,3 +83,14 @@ class RegisterRequest(BaseModel):
 class ChatHistoryResponse(BaseModel):
     session_id: str
     messages: list[dict]
+
+
+# ── Vision (Pipeline 4) ───────────────────────────────────────────────────────
+
+class ImageAnalysisResponse(BaseModel):
+    issue_type: str
+    confidence: float
+    description: str
+    evidence: str
+    should_escalate: bool
+    follow_up_message: str

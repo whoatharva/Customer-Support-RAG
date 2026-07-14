@@ -21,8 +21,8 @@ logger = get_logger(__name__)
 
 def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
     logger.info(
-        "chat turn | session=%s user=%s invoices=%s query_len=%d",
-        request.session_id, user_email, request.invoice_ids, len(request.query),
+        "chat turn | session=%s user=%s query_len=%d",
+        request.session_id, user_email, len(request.query),
     )
 
     langfuse = get_langfuse()
@@ -32,7 +32,6 @@ def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
         session_id=request.session_id,
         user_id=user_email,
         input=request.query,
-        metadata={"invoice_ids": request.invoice_ids},
     )
 
     # ── Pipeline 2: process query ─────────────────────────────────────────────
@@ -40,7 +39,6 @@ def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
 
     # ── Pipeline 3: retrieve + generate ──────────────────────────────────────
     context = {
-        "invoice_ids": request.invoice_ids or [],
         "session_id": request.session_id,
         "intent": processed["intent"],
         "entities": processed["entities"],
