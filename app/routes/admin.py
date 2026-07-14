@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from app.routes.deps import verify_admin as verify_jwt
+from app.routes.deps import verify_admin
 from app.schemas import IngestRequest, IngestResponse, IngestionStatusResponse, IngestError
 from app.helpers import database
 from app.pipelines.ingestion.indexer import run_ingestion
@@ -10,7 +10,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 @router.post("/ingest", response_model=IngestResponse)
-def ingest_documents(body: IngestRequest, _: str = Depends(verify_jwt)):
+def ingest_documents(body: IngestRequest, _: str = Depends(verify_admin)):
     logger.info("ingest request received: path=%s", body.path)
     try:
         result = run_ingestion(body.path)
@@ -33,5 +33,5 @@ def ingest_documents(body: IngestRequest, _: str = Depends(verify_jwt)):
 
 
 @router.get("/ingestion/status", response_model=list[IngestionStatusResponse])
-def ingestion_status(_: str = Depends(verify_jwt)):
+def ingestion_status(_: str = Depends(verify_admin)):
     return database.get_ingestion_logs()

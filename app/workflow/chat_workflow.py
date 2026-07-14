@@ -12,17 +12,17 @@ Cost tracking:
 """
 
 from app.helpers.langfuse import get_langfuse
+from app.config import settings
+from app.llm.prompts import SUPPORT_CONTACT
 from app.schemas import ChatRequest, ChatResponse
 from app.services.chat_service import handle_chat
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
 
-_CONFIDENCE_THRESHOLD = 0.5
 _FALLBACK_ANSWER = (
-    "I'm sorry, I wasn't able to find a confident answer to your question. "
-    "Please contact our support team at support@ourstore.com or use the live chat "
-    "(Mon–Sat, 9am–8pm IST) for further assistance."
+    f"I'm sorry, I wasn't able to find a confident answer to your question. "
+    f"Please contact our support team at {SUPPORT_CONTACT} for further assistance."
 )
 
 
@@ -31,7 +31,7 @@ def run(request: ChatRequest, user_email: str = "") -> ChatResponse:
     try:
         response = handle_chat(request, user_email=user_email)
 
-        if response.confidence < _CONFIDENCE_THRESHOLD:
+        if response.confidence < settings.confidence_threshold:
             response.should_escalate = True
 
         # Log total token count as a score so Langfuse can surface expensive turns.
@@ -57,7 +57,7 @@ def run(request: ChatRequest, user_email: str = "") -> ChatResponse:
 def _log_cost_score(session_id: str, response: ChatResponse) -> None:
     """Add a token-count score to the Langfuse trace for this session turn."""
     try:
-        total_tokens = getattr(response, "_total_tokens", None)
+        total_tokens = response.total_tokens
         if total_tokens is None:
             return
         get_langfuse().score(

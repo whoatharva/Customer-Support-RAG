@@ -1,7 +1,7 @@
 """Business data access — queries customers, orders, and products from Supabase.
 
-Public API (same signatures as before — callers are unchanged):
-    get_user_by_email(email)       -> dict | None
+Public API:
+    get_customer_by_email(email)   -> dict | None   (queries `customers` table)
     get_orders_for_user(email)     -> list[dict]
     get_order_by_id(order_id)      -> dict | None
     get_product_by_name(name)      -> dict | None   # case-insensitive substring
@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 
 # ── Users / Customers ─────────────────────────────────────────────────────────
 
-def get_user_by_email(email: str) -> dict | None:
+def get_customer_by_email(email: str) -> dict | None:
     result = (
         get_db().table("customers")
         .select("*")

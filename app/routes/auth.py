@@ -44,9 +44,9 @@ def register(body: RegisterRequest):
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest):
     """Verify credentials against Supabase users table and return a JWT."""
-    user = database.get_user_by_email(body.username)
+    user = database.get_user_by_email(body.email)
     if not user or not _verify(body.password, user["password_hash"]):
-        logger.warning("failed login attempt: username=%s", body.username)
+        logger.warning("failed login attempt: username=%s", body.email)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
-    logger.info("login success: %s", body.username)
-    return _make_token(body.username)
+    logger.info("login success: %s", body.email)
+    return _make_token(body.email)

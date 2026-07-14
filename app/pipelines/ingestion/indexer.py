@@ -66,12 +66,13 @@ def run_ingestion(folder_path: str) -> dict:
             logger.error("failed to process: %s — %s", doc.filename, e, exc_info=True)
             errors.append({"file": doc.filename, "reason": str(e)})
 
-    elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+    ended_at = datetime.now(timezone.utc)
+    elapsed = (ended_at - started_at).total_seconds()
     logger.info(
         "ingestion run completed: run_id=%s processed=%d skipped=%d chunks=%d errors=%d elapsed=%.1fs",
         run_id, processed, skipped, total_chunks, len(errors), elapsed,
     )
 
-    database.save_ingestion_log(run_id, processed, skipped, total_chunks, errors, started_at, datetime.now(timezone.utc))
+    database.save_ingestion_log(run_id, processed, skipped, total_chunks, errors, started_at, ended_at)
 
     return {"run_id": run_id, "files_processed": processed, "files_skipped": skipped, "chunks_created": total_chunks, "errors": errors}

@@ -21,17 +21,18 @@ logger = get_logger(__name__)
 
 def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
     logger.info(
-        "chat turn | session=%s user=%s invoice=%s query_len=%d",
-        request.session_id, user_email, request.invoice_id, len(request.query),
+        "chat turn | session=%s user=%s invoices=%s query_len=%d",
+        request.session_id, user_email, request.invoice_ids, len(request.query),
     )
 
     langfuse = get_langfuse()
     trace = langfuse.trace(
+        id=request.session_id,
         name="chat_turn",
         session_id=request.session_id,
         user_id=user_email,
         input=request.query,
-        metadata={"invoice_id": request.invoice_id},
+        metadata={"invoice_ids": request.invoice_ids},
     )
 
     # ── Pipeline 2: process query ─────────────────────────────────────────────
@@ -39,7 +40,7 @@ def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
 
     # ── Pipeline 3: retrieve + generate ──────────────────────────────────────
     context = {
-        "invoice_id": request.invoice_id,
+        "invoice_ids": request.invoice_ids or [],
         "session_id": request.session_id,
         "intent": processed["intent"],
         "entities": processed["entities"],
@@ -81,12 +82,10 @@ def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
         "chat turn done | session=%s confidence=%.2f escalate=%s tokens=%s",
         request.session_id, confidence, should_escalate, total_tokens,
     )
-    response = ChatResponse(
+    return ChatResponse(
         answer=answer,
         citations=citations,
         confidence=confidence,
         should_escalate=should_escalate,
+        total_tokens=total_tokens,
     )
-    # carry token count for the wrapper's cost score log (non-API field)
-    response._total_tokens = total_tokens
-    return response

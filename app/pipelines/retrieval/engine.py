@@ -17,7 +17,7 @@ PIPELINE FLOW (easy to explain):
        │
        ▼
   ④ GATE 1             — Retrieval relevancy gate:
-                         if top score < 0.35 AND no direct data → escalate immediately
+                         if top score < retrieval_min_score AND no direct data → escalate immediately
        │
        ▼
   ⑤ Context assembly   — combine: invoice + orders + FAQ chunks into one string
@@ -41,7 +41,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.llm import client as llm
-from app.llm.prompts import RESPONSE_TEMPLATE
+from app.llm.prompts import RESPONSE_TEMPLATE, SUPPORT_CONTACT
 from app.vectorstore import store as vector_store
 from app.schemas import Citation
 from app.helpers.langfuse import get_langfuse
@@ -53,12 +53,10 @@ from app.helpers.logger import get_logger
 logger = get_logger(__name__)
 
 _DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
-_CONFIDENCE_THRESHOLD = 0.5
 
 _ESCALATION_ANSWER = (
-    "I'm sorry, I wasn't able to find relevant information to answer your question. "
-    "Please contact our support team at support@ourstore.com or use the live chat "
-    "(Mon–Sat, 9am–8pm IST) for further assistance."
+    f"I'm sorry, I wasn't able to find relevant information to answer your question. "
+    f"Please contact our support team at {SUPPORT_CONTACT} for further assistance."
 )
 
 
@@ -74,12 +72,11 @@ def generate_response(query: str, context: dict) -> dict:
         {answer, citations, confidence, should_escalate}
     """
     session_id  = context.get("session_id", "")
-    invoice_id  = context.get("invoice_id")
+    invoice_ids = context.get("invoice_ids") or []
     user_email  = context.get("user_email", "")
     entities    = context.get("entities") or {}
-    _usage: dict = {}  # populated after LLM call; used for token cost tracking
 
-    logger.info("P3 start | session=%s invoice=%s user=%s", session_id, invoice_id, user_email)
+    logger.info("P3 start | session=%s invoices=%s user=%s", session_id, invoice_ids, user_email)
 
     langfuse = get_langfuse()
     trace = langfuse.trace(name="p3_generate_response", session_id=session_id, input=query)
@@ -89,8 +86,8 @@ def generate_response(query: str, context: dict) -> dict:
     search_vector = hyde.get_blended_vector(query)
     span.end(output=f"blended vector dim={len(search_vector)}")
 
-    # ── ② Load direct data: invoice + user orders/products ───────────────────
-    invoice_text   = _load_invoice(invoice_id, user_email)
+    # ── ② Load direct data: invoice(s) + user orders/products ───────────────────
+    invoice_text   = _load_invoices(invoice_ids, user_email)
     live_data_parts = _load_live_data(user_email, entities)
     has_direct_data = bool(invoice_text or live_data_parts)
 
@@ -107,10 +104,10 @@ def generate_response(query: str, context: dict) -> dict:
         trace.score(name="confidence", value=0.0)
         return _escalate(citations=[])
 
-    # ── ⑤ Assemble context: invoice → live data → FAQ chunks ─────────────────
+    # ── ⑤ Assemble context: invoice(s) → live data → FAQ chunks ─────────────────
     context_parts: list[str] = []
     if invoice_text:
-        context_parts.append(f"[INVOICE: {invoice_id}]\n{invoice_text}")
+        context_parts.append(invoice_text)
     context_parts.extend(live_data_parts)
     for r in results:
         p = r.payload
@@ -150,16 +147,18 @@ def generate_response(query: str, context: dict) -> dict:
         trace.score(name="confidence", value=0.0)
         return _escalate(citations=_build_faq_citations(results))
 
-    # ── ⑧ Citations: invoice first, then scored FAQ chunks ────────────────────
+    # ── ⑧ Citations: invoice(s) first, then scored FAQ chunks ────────────────────
     citations: list[Citation] = []
-    if invoice_text:
-        citations.append(Citation(
-            chunk_id=f"invoice_{invoice_id}",
-            source_document=f"INVOICE: {invoice_id}",
-            section="Invoice",
-            text=invoice_text[:200],
-            score=1.0,
-        ))
+    for inv_id in invoice_ids:
+        inv_text = _load_single_invoice(inv_id, user_email)
+        if inv_text:
+            citations.append(Citation(
+                chunk_id=f"invoice_{inv_id}",
+                source_document=f"INVOICE: {inv_id}",
+                section="Invoice",
+                text=inv_text[:200],
+                score=1.0,
+            ))
     citations.extend(_build_faq_citations(results))
 
     # ── ⑧ Composite confidence score ─────────────────────────────────────────
@@ -170,7 +169,7 @@ def generate_response(query: str, context: dict) -> dict:
     else:
         confidence = round(min(top_score, 1.0), 2)
 
-    should_escalate = confidence < _CONFIDENCE_THRESHOLD
+    should_escalate = confidence < settings.confidence_threshold
     trace.score(name="confidence", value=confidence)
     logger.info(
         "P3 done | confidence=%.2f (direct_data=%s top_score=%.3f) escalate=%s",
@@ -188,17 +187,8 @@ def generate_response(query: str, context: dict) -> dict:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _load_invoice(invoice_id: str | None, user_email: str = "") -> str:
-    """Load invoice from the user's own subfolder only.
-
-    Invoices live at data/invoices/{user_email}/{invoice_id}.md so a user
-    cannot read another person's invoice by guessing the ID.
-    """
-    if not invoice_id:
-        return ""
-    if not user_email:
-        logger.warning("invoice load skipped: no user_email provided (security check)")
-        return ""
+def _load_single_invoice(invoice_id: str, user_email: str) -> str:
+    """Load one invoice file from the user's own subfolder (security-gated)."""
     path = _DATA_ROOT / "invoices" / user_email / f"{invoice_id}.md"
     if path.exists():
         text = path.read_text(encoding="utf-8")
@@ -206,6 +196,21 @@ def _load_invoice(invoice_id: str | None, user_email: str = "") -> str:
         return text
     logger.warning("invoice not found (or not owned by user): %s/%s", user_email, invoice_id)
     return ""
+
+
+def _load_invoices(invoice_ids: list[str], user_email: str = "") -> str:
+    """Load one or more invoices and return them as a single labelled context block."""
+    if not invoice_ids:
+        return ""
+    if not user_email:
+        logger.warning("invoice load skipped: no user_email provided (security check)")
+        return ""
+    parts: list[str] = []
+    for inv_id in invoice_ids:
+        text = _load_single_invoice(inv_id, user_email)
+        if text:
+            parts.append(f"[INVOICE: {inv_id}]\n{text}")
+    return "\n\n---\n\n".join(parts)
 
 
 def _load_live_data(user_email: str, entities: dict) -> list[str]:

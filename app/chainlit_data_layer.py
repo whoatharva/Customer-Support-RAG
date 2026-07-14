@@ -129,7 +129,7 @@ class SupabaseDataLayer(BaseDataLayer):
                 "created_at": step_dict.get("createdAt") or _now(),
             }, on_conflict="id").execute())
         except Exception:
-            logger.debug("create_step failed: %s", step_dict.get("id"), exc_info=True)
+            logger.warning("create_step failed: %s", step_dict.get("id"), exc_info=True)
 
     async def update_step(self, step_dict: dict) -> None:
         await self.create_step(step_dict)
@@ -203,7 +203,7 @@ class SupabaseDataLayer(BaseDataLayer):
                 "updated_at": _now(),
             }, on_conflict="id").execute())
         except Exception:
-            logger.debug("update_thread failed: %s", thread_id, exc_info=True)
+            logger.warning("update_thread failed: %s", thread_id, exc_info=True)
 
     async def get_thread_author(self, thread_id: str) -> str:
         try:

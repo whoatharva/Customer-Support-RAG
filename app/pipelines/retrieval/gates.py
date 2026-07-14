@@ -17,13 +17,10 @@ GATE 2 — Answer Relevancy Check (after LLM):
 """
 
 from app.llm import lightweight
+from app.config import settings
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
-
-# Minimum retrieval score to proceed to LLM generation.
-# Below this = Qdrant found nothing semantically relevant.
-_MIN_RETRIEVAL_SCORE = 0.35
 
 _RELEVANCY_CHECK_PROMPT = """You are a strict relevancy judge for a customer support chatbot.
 
@@ -59,14 +56,14 @@ def retrieval_gate(results: list, has_direct_data: bool = False) -> bool:
         return False
 
     top_score = results[0].score
-    passed = top_score >= _MIN_RETRIEVAL_SCORE
+    passed = top_score >= settings.retrieval_min_score
 
     if passed:
-        logger.debug("GATE1 PASS: top_score=%.3f >= threshold=%.2f", top_score, _MIN_RETRIEVAL_SCORE)
+        logger.debug("GATE1 PASS: top_score=%.3f >= threshold=%.2f", top_score, settings.retrieval_min_score)
     else:
         logger.info(
             "GATE1 BLOCK: top_score=%.3f < threshold=%.2f — nothing relevant in knowledge base",
-            top_score, _MIN_RETRIEVAL_SCORE,
+            top_score, settings.retrieval_min_score,
         )
     return passed
 
