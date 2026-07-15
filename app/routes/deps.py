@@ -13,6 +13,8 @@ def verify_jwt(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme
     token = credentials.credentials
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        if payload.get("type") == "refresh":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token not accepted here")
         subject = payload.get("sub")
         if not subject:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")

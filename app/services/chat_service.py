@@ -11,6 +11,7 @@ Flow:
 from app.schemas import ChatRequest, ChatResponse
 from app.pipelines.query.processor import process_query
 from app.pipelines.retrieval.engine import generate_response
+from app.services import profile_service
 from app.helpers import session as mem
 from app.helpers import database
 from app.helpers.langfuse import get_langfuse
@@ -19,11 +20,45 @@ from app.helpers.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _persist_turn(session_id: str, user_email: str, query: str, answer: str):
+    """Store a user/assistant exchange in memory + Supabase (best effort)."""
+    mem.append(session_id, "user", query)
+    mem.append(session_id, "assistant", answer)
+    try:
+        database.ensure_chat_session(session_id, user_email)
+        database.save_chat_message(session_id, "user", query)
+        database.save_chat_message(session_id, "assistant", answer)
+    except Exception:
+        logger.error("failed to persist chat to Supabase | session=%s", session_id, exc_info=True)
+
+
 def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
     logger.info(
         "chat turn | session=%s user=%s query_len=%d",
         request.session_id, user_email, len(request.query),
     )
+
+    # ── Self-service profile branch (skips RAG) ──────────────────────────────
+    if user_email and profile_service.matches_keywords(request.query):
+        det = profile_service.detect(request.query)
+        if det["action"] == "view":
+            answer = profile_service.render_profile(user_email)
+            _persist_turn(request.session_id, user_email, request.query, answer)
+            return ChatResponse(answer=answer, citations=[], confidence=1.0)
+        if det["action"] == "update" and det["field"] in ("phone", "address"):
+            ok, error = profile_service.validate(det["field"], det["values"])
+            if ok:
+                answer = _confirm_prompt(det)
+                _persist_turn(request.session_id, user_email, request.query, answer)
+                return ChatResponse(
+                    answer=answer, citations=[], confidence=1.0,
+                    action="profile_update",
+                    action_payload={"field": det["field"], "values": det["values"]},
+                )
+            answer = error
+            _persist_turn(request.session_id, user_email, request.query, answer)
+            return ChatResponse(answer=answer, citations=[], confidence=1.0)
+        # action == "none" → fall through to RAG
 
     langfuse = get_langfuse()
     trace = langfuse.trace(
@@ -87,3 +122,11 @@ def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
         should_escalate=should_escalate,
         total_tokens=total_tokens,
     )
+
+
+def _confirm_prompt(det: dict) -> str:
+    """Human-readable confirmation text for a pending profile update."""
+    if det["field"] == "phone":
+        return f"I'll update your phone number to **{det['values'].get('phone')}**. Confirm?"
+    changed = ", ".join(f"{k}: {v}" for k, v in det["values"].items())
+    return f"I'll update your address ({changed}). Confirm?"

@@ -44,7 +44,7 @@ from app.llm.prompts import SYSTEM_PROMPT, USER_PROMPT, SUPPORT_CONTACT
 from app.vectorstore import store as vector_store
 from app.schemas import Citation
 from app.helpers.langfuse import get_langfuse
-from app.helpers import data_lookup
+from app.helpers import data_lookup, date_facts
 from app.pipelines.query import hyde
 from app.pipelines.retrieval import gates
 from app.helpers.logger import get_logger
@@ -101,8 +101,9 @@ def generate_response(query: str, context: dict) -> dict:
         trace.score(name="confidence", value=0.0)
         return _escalate(citations=[])
 
-    # ── ⑤ Assemble context: invoices → live data → FAQ chunks ────────────────
+    # ── ⑤ Assemble context: date facts → invoices → live data → FAQ chunks ────
     context_parts: list[str] = []
+    context_parts.append(date_facts.today_facts())
     for inv in db_invoices:
         context_parts.append(f"[INVOICE: {inv['invoice_id']}]\n{inv['content']}")
     context_parts.extend(live_data_parts)
@@ -200,7 +201,11 @@ def _load_live_data(user_email: str, entities: dict) -> list[str]:
         if order_id:
             order = data_lookup.get_order_by_id(order_id)
             if order:
-                parts.append(f"[ORDER: {order_id}]\n{_json.dumps(order, indent=2)}")
+                order_block = f"[ORDER: {order_id}]\n{_json.dumps(order, indent=2)}"
+                order_timing = date_facts.order_date_facts(order)
+                if order_timing:
+                    order_block += "\n" + "\n".join(order_timing)
+                parts.append(order_block)
                 logger.debug("loaded specific order: %s", order_id)
         else:
             summary = [
@@ -213,7 +218,15 @@ def _load_live_data(user_email: str, entities: dict) -> list[str]:
                 }
                 for o in user_orders
             ]
-            parts.append(f"[USER ORDERS]\n{_json.dumps(summary, indent=2)}")
+            orders_block = f"[USER ORDERS]\n{_json.dumps(summary, indent=2)}"
+            # Add precomputed date facts for each order
+            all_timing = []
+            for o in user_orders:
+                timing = date_facts.order_date_facts(o)
+                all_timing.extend(timing)
+            if all_timing:
+                orders_block += "\n[ORDER TIMING FACTS]\n" + "\n".join(all_timing)
+            parts.append(orders_block)
             logger.debug("loaded %d order summaries for user", len(user_orders))
 
     product_name = entities.get("product_name")
