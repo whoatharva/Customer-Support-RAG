@@ -74,4 +74,8 @@ def refresh(body: RefreshRequest):
     subject = payload.get("sub")
     if not subject:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")
+    user = database.get_user_by_email(subject)
+    if not user:
+        logger.warning("refresh attempted with non-existent user: %s", subject)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return _make_token(subject)

@@ -157,7 +157,7 @@ def format_ingest_result(data: dict) -> str:
 async def handle_chat_query(text: str):
     session_id = cl.user_session.get("session_id")
 
-    msg = cl.Message(content="")
+    msg = cl.Message(content="🔄 Working on your request…")
     await msg.send()
 
     try:

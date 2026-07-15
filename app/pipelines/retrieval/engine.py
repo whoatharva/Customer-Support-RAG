@@ -199,7 +199,7 @@ def _load_live_data(user_email: str, entities: dict) -> list[str]:
     if user_orders:
         order_id = entities.get("order_id")
         if order_id:
-            order = data_lookup.get_order_by_id(order_id)
+            order = data_lookup.get_order_by_id(order_id, user_email)
             if order:
                 order_block = f"[ORDER: {order_id}]\n{_json.dumps(order, indent=2)}"
                 order_timing = date_facts.order_date_facts(order)
