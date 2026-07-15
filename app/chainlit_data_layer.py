@@ -236,16 +236,37 @@ class SupabaseDataLayer(BaseDataLayer):
             except Exception:
                 user_uuid = user_email  # fallback: store email as id
 
+        # Merge with the existing row: Chainlit calls update_thread multiple times
+        # per session (start, rename, disconnect) each passing only a subset of
+        # fields. A blind full-row upsert would reset the name to "New Conversation"
+        # and wipe session_id metadata. So only overwrite fields explicitly passed.
+        existing: dict = {}
         try:
-            await _run(lambda: get_db().table("cl_threads").upsert({
-                "id": thread_id,
-                "name": name or "New Conversation",
-                "user_identifier": user_email,   # email — Chainlit auth check
-                "user_id": user_uuid,             # UUID  — list_threads filter
-                "metadata": metadata or {},
-                "tags": tags or [],
-                "updated_at": _now(),
-            }, on_conflict="id").execute())
+            res = await _run(
+                lambda: get_db().table("cl_threads").select("*")
+                    .eq("id", thread_id).limit(1).execute()
+            )
+            if res.data:
+                existing = res.data[0]
+        except Exception:
+            logger.debug("update_thread existing-row read failed: %s", thread_id, exc_info=True)
+
+        # Treat an explicit "New Conversation" as "no name" — Chainlit's internal
+        # calls pass that default and would otherwise clobber a real title.
+        incoming_name = name if name and name != "New Conversation" else None
+
+        row = {
+            "id": thread_id,
+            "name": incoming_name or existing.get("name") or "New Conversation",
+            "user_identifier": user_email or existing.get("user_identifier"),
+            "user_id": user_uuid or existing.get("user_id"),
+            "metadata": {**(existing.get("metadata") or {}), **(metadata or {})},
+            "tags": tags if tags is not None else (existing.get("tags") or []),
+            "updated_at": _now(),
+        }
+
+        try:
+            await _run(lambda: get_db().table("cl_threads").upsert(row, on_conflict="id").execute())
         except Exception:
             logger.warning("update_thread failed: %s", thread_id, exc_info=True)
 
@@ -300,28 +321,6 @@ class SupabaseDataLayer(BaseDataLayer):
             )
         except Exception:
             logger.debug("delete_thread failed: %s", thread_id, exc_info=True)
-
-    async def find_thread_by_name(self, user_uuid: str, name: str, exclude_thread_id: str = "") -> Optional[dict]:
-        """Return {id, name} of an existing thread with this name for the user, or None.
-
-        Used to redirect the user directly to their existing invoice conversation
-        instead of opening a duplicate thread.
-        """
-        try:
-            result = await _run(
-                lambda: get_db().table("cl_threads")
-                    .select("id, name")
-                    .eq("user_id", user_uuid)
-                    .eq("name", name)
-                    .limit(5)
-                    .execute()
-            )
-            rows = result.data or []
-            others = [r for r in rows if r["id"] != exclude_thread_id]
-            return others[0] if others else None
-        except Exception:
-            logger.debug("find_thread_by_name check failed", exc_info=True)
-            return None
 
     async def list_threads(
         self, pagination: Pagination, filters: ThreadFilter

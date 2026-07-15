@@ -9,7 +9,7 @@ Steps per turn:
 """
 
 import json
-from app.helpers import session as memory
+from app.helpers import database
 from app.llm import client as llm
 from app.llm.prompts import QUERY_REWRITE_TEMPLATE
 from app.helpers.langfuse import get_langfuse
@@ -48,8 +48,8 @@ def process_query(query: str, session_id: str) -> dict:
     langfuse = get_langfuse()
     trace = langfuse.trace(name="p2_process_query", session_id=session_id, input=query)
 
-    # ── Step 1: conversation history ─────────────────────────────────────────
-    history = memory.get_history(session_id)
+    # ── Step 1: conversation history (from Supabase, durable across workers) ────
+    history = database.get_chat_history_db(session_id, limit=50)
     logger.debug("P2 history: %d message(s)", len(history))
 
     # ── Step 2: query rewrite (only when there is prior context) ─────────────

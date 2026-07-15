@@ -38,6 +38,3 @@ Customer question:
 
 Answer:
 """.strip()
-
-# Keep for backwards-compat with anything that still imports RESPONSE_TEMPLATE
-RESPONSE_TEMPLATE = SYSTEM_PROMPT + "\n\n" + USER_PROMPT
