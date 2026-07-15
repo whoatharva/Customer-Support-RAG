@@ -1,11 +1,11 @@
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, status
-from jose import jwt
+from jose import JWTError, jwt
 import bcrypt
 
 from app.config import settings
 from app.helpers import database
-from app.schemas import LoginRequest, TokenResponse, RegisterRequest
+from app.schemas import LoginRequest, TokenResponse, RegisterRequest, RefreshRequest
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
@@ -20,14 +20,21 @@ def _verify(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 
-def _make_token(email: str) -> TokenResponse:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expiry_minutes)
-    token = jwt.encode(
-        {"sub": email, "exp": expire},
+def _encode(subject: str, minutes: int, token_type: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    return jwt.encode(
+        {"sub": subject, "exp": expire, "type": token_type},
         settings.jwt_secret,
         algorithm=settings.jwt_algorithm,
     )
-    return TokenResponse(access_token=token, expires_in=settings.jwt_expiry_minutes * 60)
+
+
+def _make_token(email: str) -> TokenResponse:
+    return TokenResponse(
+        access_token=_encode(email, settings.jwt_expiry_minutes, "access"),
+        refresh_token=_encode(email, settings.jwt_refresh_expiry_minutes, "refresh"),
+        expires_in=settings.jwt_expiry_minutes * 60,
+    )
 
 
 @router.post("/register", response_model=TokenResponse, status_code=201)
@@ -50,3 +57,21 @@ def login(body: LoginRequest):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
     logger.info("login success: %s", body.email)
     return _make_token(body.email)
+
+
+@router.post("/refresh", response_model=TokenResponse)
+def refresh(body: RefreshRequest):
+    """Exchange a valid refresh token for a fresh access + refresh token pair."""
+    try:
+        payload = jwt.decode(
+            body.refresh_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
+        )
+    except JWTError as e:
+        logger.warning("refresh token decode failed: %s", e)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token")
+    if payload.get("type") != "refresh":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not a refresh token")
+    subject = payload.get("sub")
+    if not subject:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")
+    return _make_token(subject)

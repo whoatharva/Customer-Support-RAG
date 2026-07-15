@@ -23,7 +23,11 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 def _mint_jwt(subject: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expiry_minutes)
-    return jwt.encode({"sub": subject, "exp": expire}, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    return jwt.encode(
+        {"sub": subject, "exp": expire, "type": "access"},
+        settings.jwt_secret,
+        algorithm=settings.jwt_algorithm,
+    )
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -46,8 +50,15 @@ async def auth_callback(username: str, password: str) -> cl.User | None:
                 json={"email": username, "password": password},
             )
             if res.status_code == 200:
-                token = res.json()["access_token"]
-                return cl.User(identifier=username, metadata={"token": token, "role": "user"})
+                body = res.json()
+                return cl.User(
+                    identifier=username,
+                    metadata={
+                        "token": body["access_token"],
+                        "refresh_token": body["refresh_token"],
+                        "role": "user",
+                    },
+                )
             print(f"[auth] login failed: status={res.status_code} body={res.text}")
         except Exception as e:
             print(f"[auth] exception calling API: {e}")
@@ -58,6 +69,61 @@ def get_token() -> str:
     return cl.user_session.get("user").metadata.get("token", "")
 
 
+async def _refresh_token() -> bool:
+    """Obtain a fresh access token. Returns True on success.
+
+    Admin tokens are minted locally; user tokens are refreshed via the API using
+    the stored refresh token. The new access token is written back to the session.
+    """
+    user = cl.user_session.get("user")
+    if user is None:
+        return False
+    meta = user.metadata
+
+    if meta.get("role") == "admin":
+        meta["token"] = _mint_jwt(settings.admin_username)
+        cl.user_session.set("user", user)
+        return True
+
+    refresh = meta.get("refresh_token")
+    if not refresh:
+        return False
+    async with httpx.AsyncClient() as client:
+        try:
+            res = await client.post(
+                f"{API_BASE}/auth/refresh",
+                json={"refresh_token": refresh},
+            )
+        except Exception as e:
+            print(f"[auth] refresh exception: {e}")
+            return False
+    if res.status_code != 200:
+        print(f"[auth] refresh failed: status={res.status_code}")
+        return False
+    body = res.json()
+    meta["token"] = body["access_token"]
+    meta["refresh_token"] = body["refresh_token"]
+    cl.user_session.set("user", user)
+    return True
+
+
+async def authed_request(method: str, path: str, **kwargs) -> httpx.Response:
+    """Perform an authenticated API request, transparently refreshing the token
+    and retrying once on a 401. Callers should raise_for_status() as usual.
+    """
+    timeout = kwargs.pop("timeout", 60)
+    base_headers = kwargs.pop("headers", {})
+    for attempt in range(2):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            headers = {**base_headers, "Authorization": f"Bearer {get_token()}"}
+            res = await client.request(method, f"{API_BASE}{path}", headers=headers, **kwargs)
+        if res.status_code != 401 or attempt == 1:
+            return res
+        if not await _refresh_token():
+            return res
+    return res
+
+
 def is_admin() -> bool:
     user = cl.user_session.get("user")
     return user is not None and user.metadata.get("role") == "admin"
@@ -66,14 +132,11 @@ def is_admin() -> bool:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def call_ingest(path: str) -> dict:
-    async with httpx.AsyncClient(timeout=120) as client:
-        res = await client.post(
-            f"{API_BASE}/admin/ingest",
-            json={"path": path},
-            headers={"Authorization": f"Bearer {get_token()}"},
-        )
-        res.raise_for_status()
-        return res.json()
+    res = await authed_request(
+        "POST", "/admin/ingest", json={"path": path}, timeout=120
+    )
+    res.raise_for_status()
+    return res.json()
 
 
 def format_ingest_result(data: dict) -> str:
@@ -98,14 +161,22 @@ async def handle_chat_query(text: str):
     await msg.send()
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            res = await client.post(
-                f"{API_BASE}/chat/query",
-                json={"session_id": session_id, "query": text},
-                headers={"Authorization": f"Bearer {get_token()}"},
-            )
-            res.raise_for_status()
-            data = res.json()
+        res = await authed_request(
+            "POST", "/chat/query", json={"session_id": session_id, "query": text}
+        )
+        res.raise_for_status()
+        data = res.json()
+
+        # Profile update awaiting confirmation — render Confirm/Cancel buttons.
+        if data.get("action") == "profile_update":
+            payload = data.get("action_payload") or {}
+            msg.content = data["answer"]
+            msg.actions = [
+                cl.Action(name="confirm_profile", payload=payload, label="✅ Confirm"),
+                cl.Action(name="cancel_profile", payload={}, label="✖ Cancel"),
+            ]
+            await msg.update()
+            return
 
         answer = data["answer"]
         should_escalate = data["should_escalate"]
@@ -135,7 +206,10 @@ async def handle_chat_query(text: str):
         # Auto-name the thread after the first message
         if not cl.user_session.get("thread_named"):
             thread_name = text[:60].strip()
-            await cl.context.emitter.update_thread(name=thread_name)
+            user_email = cl.context.session.user.identifier if cl.context.session.user else None
+            await cl_data.get_data_layer().update_thread(
+                thread_id=cl.context.session.thread_id, name=thread_name, user_id=user_email
+            )
             cl.user_session.set("thread_named", True)
 
     except httpx.HTTPStatusError as e:
@@ -154,7 +228,10 @@ async def start():
     cl.user_session.set("session_id", session_id)
     cl.user_session.set("thread_named", False)
     # Persist session_id so on_chat_resume can restore it
-    await cl.context.emitter.update_thread(metadata={"session_id": session_id})
+    user_email = cl.context.session.user.identifier if cl.context.session.user else None
+    await cl_data.get_data_layer().update_thread(
+        thread_id=cl.context.session.thread_id, user_id=user_email, metadata={"session_id": session_id}
+    )
 
     if is_admin():
         cl.user_session.set("browse_path", os.path.expanduser("~"))
@@ -244,16 +321,16 @@ async def _handle_user_image_upload(message: cl.Message):
 
     f = images[0]
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            with open(f.path, "rb") as img_file:
-                res = await client.post(
-                    f"{API_BASE}/chat/analyze-image",
-                    data={"session_id": session_id},
-                    files={"file": (f.name, img_file, _mime_type(f.name))},
-                    headers={"Authorization": f"Bearer {get_token()}"},
-                )
-                res.raise_for_status()
-                data = res.json()
+        with open(f.path, "rb") as img_file:
+            img_bytes = img_file.read()
+        res = await authed_request(
+            "POST",
+            "/chat/analyze-image",
+            data={"session_id": session_id},
+            files={"file": (f.name, img_bytes, _mime_type(f.name))},
+        )
+        res.raise_for_status()
+        data = res.json()
 
         msg.content = data["follow_up_message"]
         await msg.update()
@@ -350,6 +427,31 @@ async def on_browse_ingest(action: cl.Action):
         await msg.update()
 
 
+@cl.action_callback("confirm_profile")
+async def on_confirm_profile(action: cl.Action):
+    payload = action.payload or {}
+    await action.remove()
+    msg = cl.Message(content="Applying your change...")
+    await msg.send()
+    try:
+        res = await authed_request("PUT", "/profile/contact", json=payload)
+        if res.status_code == 400:
+            msg.content = res.json().get("detail", "That change wasn't valid.")
+        else:
+            res.raise_for_status()
+            field = payload.get("field", "profile")
+            msg.content = f"✅ Your {field} has been updated."
+    except Exception as e:
+        msg.content = f"Sorry, the update failed: {e}"
+    await msg.update()
+
+
+@cl.action_callback("cancel_profile")
+async def on_cancel_profile(action: cl.Action):
+    await action.remove()
+    await cl.Message(content="No changes made.").send()
+
+
 # ── Message handler ───────────────────────────────────────────────────────────
 
 @cl.on_message
@@ -395,13 +497,9 @@ async def on_message(message: cl.Message):
         msg = cl.Message(content="Fetching ingestion history...")
         await msg.send()
         try:
-            async with httpx.AsyncClient() as client:
-                res = await client.get(
-                    f"{API_BASE}/admin/ingestion/status",
-                    headers={"Authorization": f"Bearer {get_token()}"},
-                )
-                res.raise_for_status()
-                runs = res.json()
+            res = await authed_request("GET", "/admin/ingestion/status")
+            res.raise_for_status()
+            runs = res.json()
 
             if not runs:
                 msg.content = "No ingestion runs found."

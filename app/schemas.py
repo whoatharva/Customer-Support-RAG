@@ -12,8 +12,13 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
     expires_in: int = settings.jwt_expiry_minutes * 60
 
@@ -68,6 +73,22 @@ class ChatResponse(BaseModel):
     confidence: float
     should_escalate: bool = False
     total_tokens: int | None = None
+    # Pending client-side action (e.g. a profile update awaiting Confirm/Cancel).
+    action: str | None = None
+    action_payload: dict | None = None
+
+
+# ── Profile (self-service) ────────────────────────────────────────────────────
+
+class UpdateProfileRequest(BaseModel):
+    field: str            # "phone" | "address"
+    values: dict          # {"phone": ...} or {"line1": ..., "city": ..., ...}
+
+
+class ProfileResponse(BaseModel):
+    phone: Optional[str] = None
+    address: Optional[dict] = None
+    orders: list[dict] = []
 
 
 # ── Auth (extended) ───────────────────────────────────────────────────────────

@@ -172,3 +172,60 @@ def get_invoice_by_id(invoice_id: str, email: str) -> dict | None:
         .execute()
     )
     return result.data[0] if result.data else None
+
+
+# ── Customers (self-service profile) ──────────────────────────────────────────
+
+# Fields a user is allowed to edit on their default address.
+ADDRESS_EDITABLE_FIELDS = ("line1", "line2", "city", "state", "pincode")
+
+
+def get_customer_full(email: str) -> dict | None:
+    """Full customer profile row (phone, addresses, loyalty, etc.) by email."""
+    result = (
+        get_db().table("customers").select("*").ilike("email", email).limit(1).execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def update_customer_phone(email: str, phone: str) -> dict:
+    """Set the customer's root phone number. Returns the updated row."""
+    try:
+        result = (
+            get_db().table("customers").update({"phone": phone})
+            .ilike("email", email).execute()
+        )
+        logger.info("customer phone updated: %s", email)
+        return result.data[0] if result.data else {}
+    except Exception:
+        logger.error("failed to update customer phone: %s", email, exc_info=True)
+        raise
+
+
+def update_customer_default_address(email: str, fields: dict) -> dict:
+    """Patch the customer's default (first saved) address.
+
+    Only keys in ADDRESS_EDITABLE_FIELDS are applied. The whole `addresses`
+    list is written back. Returns the updated row.
+    """
+    customer = get_customer_full(email)
+    if not customer:
+        raise ValueError(f"no customer for {email}")
+
+    addresses = customer.get("addresses") or []
+    patch = {k: v for k, v in fields.items() if k in ADDRESS_EDITABLE_FIELDS}
+    if addresses:
+        addresses[0] = {**addresses[0], **patch}
+    else:
+        addresses = [patch]
+
+    try:
+        result = (
+            get_db().table("customers").update({"addresses": addresses})
+            .ilike("email", email).execute()
+        )
+        logger.info("customer default address updated: %s", email)
+        return result.data[0] if result.data else {}
+    except Exception:
+        logger.error("failed to update customer address: %s", email, exc_info=True)
+        raise
