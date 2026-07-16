@@ -316,7 +316,19 @@ async def _handle_user_image_upload(message: cl.Message):
         return
 
     session_id = cl.user_session.get("session_id")
-    msg = cl.Message(content="Analyzing your image...")
+
+    # Ask the customer what they're claiming, so we can verify the photo against it.
+    claim_reply = await cl.AskUserMessage(
+        content="What issue are you reporting with this item? "
+                "(e.g. 'the screen is cracked', 'wrong item delivered')",
+        timeout=180,
+    ).send()
+    claim = (claim_reply or {}).get("output", "").strip() if claim_reply else ""
+    if not claim:
+        claim = "Customer reports an issue with the delivered item (no details provided)."
+
+    msg = cl.Message(content="Verifying your claim against the photo... "
+                             "(this may pause for a manual review)")
     await msg.send()
 
     f = images[0]
@@ -326,13 +338,15 @@ async def _handle_user_image_upload(message: cl.Message):
         res = await authed_request(
             "POST",
             "/chat/analyze-image",
-            data={"session_id": session_id},
+            data={"session_id": session_id, "claim": claim},
             files={"file": (f.name, img_bytes, _mime_type(f.name))},
         )
         res.raise_for_status()
         data = res.json()
 
-        msg.content = data["follow_up_message"]
+        decision = data["decision"].upper()
+        badge = "✅" if data["decision"] == "approved" else "❌"
+        msg.content = f"{badge} **Refund {decision}**\n\n{data['customer_message']}"
         await msg.update()
 
     except httpx.HTTPStatusError as e:

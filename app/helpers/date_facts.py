@@ -9,7 +9,6 @@ AVAILABLE TOOLS:
   • get_product_by_name(name)            → product search
   • get_product_by_id(product_id)        → product by id
   • get_invoices_for_user(email)         → all invoices for user
-  • get_invoice_by_id(id, email)         → one invoice
   • profile view/update                  → self-service account changes
   • date_facts.today_facts()             → current date block
   • date_facts.order_date_facts(order)   → precomputed order timing

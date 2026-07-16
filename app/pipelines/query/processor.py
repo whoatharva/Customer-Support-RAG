@@ -11,27 +11,11 @@ Steps per turn:
 import json
 from app.helpers import database
 from app.llm import client as llm
-from app.llm.prompts import QUERY_REWRITE_TEMPLATE
+from app.llm.prompts import QUERY_REWRITE_TEMPLATE, INTENT_PROMPT
 from app.helpers.langfuse import get_langfuse
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
-
-_INTENT_PROMPT = """
-Analyse the customer support query below and respond with ONLY valid JSON — no extra text.
-
-Query: {query}
-
-JSON format:
-{{
-  "intent": "<one of: return_request | shipping_inquiry | warranty_inquiry | payment_inquiry | account_inquiry | general_policy | other>",
-  "entities": {{
-    "order_id": "<order id string or null>",
-    "invoice_id": "<invoice id string or null>",
-    "product_name": "<product name or null>"
-  }}
-}}
-""".strip()
 
 
 def process_query(query: str, session_id: str) -> dict:
@@ -66,7 +50,7 @@ def process_query(query: str, session_id: str) -> dict:
         logger.debug("P2 rewrite: skipped (no history)")
 
     # ── Step 3: intent + entity extraction ───────────────────────────────────
-    intent_prompt = _INTENT_PROMPT.format(query=rewritten_query)
+    intent_prompt = INTENT_PROMPT.format(query=rewritten_query)
     span = trace.span(name="p2_intent_extract", input=intent_prompt)
     raw = llm.chat([{"role": "user", "content": intent_prompt}])
     raw_text = raw["choices"][0]["message"]["content"].strip()

@@ -16,6 +16,7 @@ import json
 
 from app.helpers import database, data_lookup
 from app.llm import lightweight
+from app.llm.prompts import DETECT_PROMPT
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
@@ -27,33 +28,6 @@ PROFILE_KEYWORDS = (
     "my profile", "my details", "my account", "my info",
 )
 
-_DETECT_PROMPT = """
-You classify a customer message about their own account profile.
-Respond with ONLY valid JSON — no extra text.
-
-Message: {query}
-
-JSON format:
-{{
-  "action": "<view | update | none>",
-  "field": "<phone | address | null>",
-  "values": {{
-    "phone": "<10-digit number, if updating phone, else null>",
-    "line1": "<street/flat, if updating address, else null>",
-    "line2": "<area/landmark, else null>",
-    "city": "<city, else null>",
-    "state": "<state, else null>",
-    "pincode": "<6-digit pincode, else null>"
-  }}
-}}
-
-Rules:
-- "action": "view" when the user wants to SEE their profile/details/orders.
-- "action": "update" when they want to CHANGE phone or address.
-- "action": "none" when the message is unrelated to their profile.
-- Only fill "values" keys that the user actually provided; use null otherwise.
-""".strip()
-
 
 def matches_keywords(query: str) -> bool:
     q = query.lower()
@@ -62,7 +36,7 @@ def matches_keywords(query: str) -> bool:
 
 def detect(query: str) -> dict:
     """LLM classify into {action, field, values}. Safe default on any failure."""
-    raw = lightweight.call(_DETECT_PROMPT.format(query=query), max_tokens=200)
+    raw = lightweight.call(DETECT_PROMPT.format(query=query), max_tokens=200)
     try:
         parsed = json.loads(_strip_fences(raw))
     except (json.JSONDecodeError, TypeError):

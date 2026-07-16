@@ -9,6 +9,7 @@ Tables managed here:
   customers        — customer profiles (loyalty, subscription, addresses)
   products         — product catalog (warranty, pricing, stock)
   orders           — order history with items/payment/logistics as JSONB
+  refund_requests  — refund verification outcomes (claim, decision, confidence)
 
 """
 
@@ -134,11 +135,6 @@ def get_chat_history_db(session_id: str, limit: int = 50) -> list[dict]:
     return result.data
 
 
-def delete_chat_session(session_id: str):
-    # chat_messages rows cascade-delete via FK
-    get_db().table("chat_sessions").delete().eq("id", session_id).execute()
-    logger.info("chat session deleted: %s", session_id)
-
 def get_invoices_for_user(email: str) -> list[dict]:
     result = (
         get_db().table("invoices")
@@ -149,16 +145,32 @@ def get_invoices_for_user(email: str) -> list[dict]:
     return result.data or []
 
 
-def get_invoice_by_id(invoice_id: str, email: str) -> dict | None:
-    result = (
-        get_db().table("invoices")
-        .select("invoice_id, order_id, content")
-        .eq("invoice_id", invoice_id)
-        .eq("user_email", email)
-        .limit(1)
-        .execute()
-    )
-    return result.data[0] if result.data else None
+# ── Refund requests (Pipeline 4) ──────────────────────────────────────────────
+
+def create_refund_request(
+    user_email: str,
+    session_id: str,
+    claim: str,
+    verification,
+    decision: str,
+    decided_by: str,
+) -> dict:
+    """Persist a refund verification outcome. `verification` is a VerificationResult."""
+    row = {
+        "user_email": user_email,
+        "session_id": session_id,
+        "claim": claim,
+        "authentic": verification.authentic,
+        "issue_type": verification.issue_type,
+        "issue_matches_claim": verification.issue_matches_claim,
+        "confidence": verification.confidence,
+        "decision": decision,
+        "decided_by": decided_by,
+        "evidence": verification.evidence,
+    }
+    result = get_db().table("refund_requests").insert(row).execute()
+    logger.info("refund request saved | user=%s decision=%s by=%s", user_email, decision, decided_by)
+    return result.data[0] if result.data else row
 
 
 # ── Customers (self-service profile) ──────────────────────────────────────────

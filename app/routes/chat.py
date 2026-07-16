@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from app.routes.deps import verify_jwt
-from app.schemas import ChatRequest, ChatResponse, ImageAnalysisResponse
+from app.schemas import ChatRequest, ChatResponse, RefundDecisionResponse
 from app.workflow.chat_workflow import run as workflow_run
 from app.helpers.logger import get_logger
 
@@ -17,14 +17,15 @@ def chat(body: ChatRequest, user_email: str = Depends(verify_jwt)):
     return workflow_run(body, user_email=user_email)
 
 
-@router.post("/analyze-image", response_model=ImageAnalysisResponse)
+@router.post("/analyze-image", response_model=RefundDecisionResponse)
 async def analyze_image(
     file: UploadFile = File(...),
     session_id: str = Form(...),
+    claim: str = Form(...),
     user_email: str = Depends(verify_jwt),
 ):
-    """Run Pipeline 4: classify a product/package photo for support issues."""
-    from app.pipelines.vision.analyzer import analyze_product_image, build_follow_up_message
+    """Run Pipeline 4: verify a refund claim from a product/package photo."""
+    from app.pipelines.vision.analyzer import process_refund_claim
 
     mime_type = file.content_type or "image/jpeg"
     if mime_type not in _SUPPORTED_IMAGE_TYPES:
@@ -37,16 +38,8 @@ async def analyze_image(
     image_bytes = await file.read()
 
     try:
-        analysis = analyze_product_image(image_bytes, mime_type)
+        result = await process_refund_claim(image_bytes, mime_type, claim, user_email, session_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    follow_up = build_follow_up_message(analysis)
-    return ImageAnalysisResponse(
-        issue_type=analysis.issue_type,
-        confidence=analysis.confidence,
-        description=analysis.description,
-        evidence=analysis.evidence,
-        should_escalate=analysis.should_escalate,
-        follow_up_message=follow_up,
-    )
+    return RefundDecisionResponse(**result)
