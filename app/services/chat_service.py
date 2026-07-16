@@ -13,6 +13,7 @@ from app.pipelines.retrieval.engine import generate_response
 from app.services import profile_service
 from app.helpers import database
 from app.llm import lightweight
+from app.llm.prompts import SPLIT_PROMPT
 from app.helpers.langfuse import get_langfuse
 from app.helpers.logger import get_logger
 
@@ -256,23 +257,13 @@ def _looks_multi_intent(query: str) -> bool:
     return profile_service.matches_keywords(q) or _has_secondary_question(q)
 
 
-_SPLIT_PROMPT = """
-Split the customer message below into independent, self-contained requests.
-Respond with ONLY a JSON array of strings — no extra text.
-Rewrite each part so it stands alone (resolve "it"/"that" if possible).
-If the message is really a single request, return a one-element array.
-
-Message: {query}
-""".strip()
-
-
 def _split_intents(query: str) -> list[str]:
     """Decompose a multi-intent message into sub-queries via the lightweight LLM.
 
     Degrades to `[query]` (single-shot) on any parse/LLM failure or a 1-item result.
     """
     try:
-        raw = lightweight.call(_SPLIT_PROMPT.format(query=query), max_tokens=300).strip()
+        raw = lightweight.call(SPLIT_PROMPT.format(query=query), max_tokens=300).strip()
         # Strip a ```json ... ``` fence if the model added one.
         if raw.startswith("```"):
             raw = raw.strip("`")

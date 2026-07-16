@@ -21,18 +21,11 @@ HOW WE BLEND:
 
 from app.llm import client as llm
 from app.llm import lightweight
+from app.llm.prompts import HYDE_PROMPT
 from app.config import settings
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
-
-_HYDE_PROMPT = """You are a customer support assistant. Write a SHORT 2-sentence answer
-to the following question, as if you had access to all order and policy information.
-Be specific and factual. Do NOT say "I don't know".
-
-Question: {query}
-
-Answer (2 sentences max):""".strip()
 
 
 def get_blended_vector(query: str) -> list[float]:
@@ -48,7 +41,7 @@ def get_blended_vector(query: str) -> list[float]:
     logger.debug("HyDE: query embedded (dim=%d)", len(query_vector))
 
     # Step 2: generate a hypothetical answer via lightweight LLM
-    prompt = _HYDE_PROMPT.format(query=query)
+    prompt = HYDE_PROMPT.format(query=query)
     hypothetical_answer = lightweight.call(prompt, max_tokens=120)
 
     if not hypothetical_answer:

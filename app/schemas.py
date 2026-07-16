@@ -99,19 +99,11 @@ class RegisterRequest(BaseModel):
     password: str
 
 
-# ── Chat history ──────────────────────────────────────────────────────────────
-
-class ChatHistoryResponse(BaseModel):
-    session_id: str
-    messages: list[dict]
-
-
 # ── Vision (Pipeline 4) ───────────────────────────────────────────────────────
 
-class ImageAnalysisResponse(BaseModel):
-    issue_type: str
+class RefundDecisionResponse(BaseModel):
+    decision: str
+    reason: str
     confidence: float
-    description: str
-    evidence: str
-    should_escalate: bool
-    follow_up_message: str
+    issue_type: str
+    customer_message: str

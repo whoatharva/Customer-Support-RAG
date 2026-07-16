@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     vision_low_confidence: float = 0.40
     max_image_size_mb: int = 10
 
+    # Refund verification (Pipeline 4)
+    refund_auto_approve_threshold: float = 0.85   # confidence >= → auto-approve
+    refund_auto_reject_threshold: float = 0.40    # confidence <  → auto-reject
+    # confidence between the two thresholds → Human-in-the-Loop review
+
     # Logging
     log_level: str = "INFO"
 
