@@ -178,6 +178,17 @@ async def handle_chat_query(text: str):
             await msg.update()
             return
 
+        # Order cancellation awaiting confirmation — render Confirm/Cancel buttons.
+        if data.get("action") == "order_cancel":
+            payload = data.get("action_payload") or {}
+            msg.content = data["answer"]
+            msg.actions = [
+                cl.Action(name="confirm_order_cancel", payload=payload, label="✅ Yes, cancel it"),
+                cl.Action(name="dismiss_order_cancel", payload={}, label="✖ Keep my order"),
+            ]
+            await msg.update()
+            return
+
         answer = data["answer"]
         should_escalate = data["should_escalate"]
         citations = data.get("citations", [])
@@ -377,25 +388,25 @@ async def show_folder_browser(path: str):
 
     parent = os.path.dirname(path)
     if parent != path:
-        actions.append(cl.Action(name="browse_up", value=parent, label=".. (go up)"))
+        actions.append(cl.Action(name="browse_up", payload={"path": parent}, label=".. (go up)"))
 
     for entry in entries:
         if entry.is_dir():
             actions.append(cl.Action(
                 name="browse_cd",
-                value=entry.path,
+                payload={"path": entry.path},
                 label=f"📁 {entry.name}",
             ))
         elif os.path.splitext(entry.name)[1].lower() in SUPPORTED_EXTENSIONS:
             actions.append(cl.Action(
                 name="browse_file",
-                value=entry.path,
+                payload={"path": entry.path},
                 label=f"📄 {entry.name}",
             ))
 
     actions.append(cl.Action(
         name="browse_ingest",
-        value=path,
+        payload={"path": path},
         label=f"✅ Ingest this folder: {os.path.basename(path) or path}",
     ))
 
@@ -411,22 +422,23 @@ async def show_folder_browser(path: str):
 
 @cl.action_callback("browse_cd")
 async def on_browse_cd(action: cl.Action):
-    await show_folder_browser(action.value)
+    await show_folder_browser(action.payload.get("path", ""))
 
 
 @cl.action_callback("browse_up")
 async def on_browse_up(action: cl.Action):
-    await show_folder_browser(action.value)
+    await show_folder_browser(action.payload.get("path", ""))
 
 
 @cl.action_callback("browse_file")
 async def on_browse_file(action: cl.Action):
-    await cl.Message(content=f"Selected file: `{action.value}`\nTo ingest it, ingest its parent folder.").send()
+    path = action.payload.get("path", "")
+    await cl.Message(content=f"Selected file: `{path}`\nTo ingest it, ingest its parent folder.").send()
 
 
 @cl.action_callback("browse_ingest")
 async def on_browse_ingest(action: cl.Action):
-    path = action.value
+    path = action.payload.get("path", "")
     msg = cl.Message(content=f"Ingesting folder `{path}`...")
     await msg.send()
     try:
@@ -464,6 +476,36 @@ async def on_confirm_profile(action: cl.Action):
 async def on_cancel_profile(action: cl.Action):
     await action.remove()
     await cl.Message(content="No changes made.").send()
+
+
+@cl.action_callback("confirm_order_cancel")
+async def on_confirm_order_cancel(action: cl.Action):
+    payload = action.payload or {}
+    await action.remove()
+    session_id = cl.user_session.get("session_id")
+    msg = cl.Message(content="Cancelling your order...")
+    await msg.send()
+    try:
+        res = await authed_request(
+            "POST",
+            "/chat/cancel-order",
+            json={"session_id": session_id, "order_id": payload.get("order_id", "")},
+        )
+        if res.status_code == 409:
+            msg.content = res.json().get("detail", "That order could not be cancelled.")
+        else:
+            res.raise_for_status()
+            data = res.json()
+            msg.content = f"✅ {data['message']}"
+    except Exception as e:
+        msg.content = f"Sorry, the cancellation failed: {e}"
+    await msg.update()
+
+
+@cl.action_callback("dismiss_order_cancel")
+async def on_dismiss_order_cancel(action: cl.Action):
+    await action.remove()
+    await cl.Message(content="No changes made — your order is still active.").send()
 
 
 # ── Message handler ───────────────────────────────────────────────────────────

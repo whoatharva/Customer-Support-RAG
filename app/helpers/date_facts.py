@@ -4,14 +4,13 @@ Computes and formats date-based information so the LLM never has to do date math
 Uses stdlib datetime (ISO 8601 parsing) and calendar (weekday/month names).
 
 AVAILABLE TOOLS:
-  • get_orders_for_user(email)           → all orders for a user
-  • get_order_by_id(order_id)            → one order
-  • get_product_by_name(name)            → product search
-  • get_product_by_id(product_id)        → product by id
-  • get_invoices_for_user(email)         → all invoices for user
-  • profile view/update                  → self-service account changes
-  • date_facts.today_facts()             → current date block
-  • date_facts.order_date_facts(order)   → precomputed order timing
+  • order_lookup.get_orders_for_user(email)   → all orders for a user
+  • order_lookup.get_order_by_id(order_id)    → one order
+  • order_lookup.get_product_by_name(name)    → product search
+  • order_lookup.get_invoices_for_user(email) → all invoices for user
+  • profile view/update                        → self-service account changes
+  • date_facts.today_facts()                   → current date block
+  • date_facts.order_date_facts(order)         → precomputed order timing
 """
 
 import calendar

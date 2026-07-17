@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 from app.pipelines.ingestion.loader import RawDocument, load_documents
 from app.pipelines.ingestion.chunker import Chunk, chunk_document
-from app.pipelines.ingestion import indexer
+from app.pipelines.ingestion import ingester
 from app.config import settings
 
 
@@ -60,17 +60,17 @@ def _fake_doc(filename="shipping.md", content_hash="hash1") -> RawDocument:
 
 
 def test_run_ingestion_skips_unchanged(monkeypatch):
-    monkeypatch.setattr(indexer.vector_store, "ensure_collection", MagicMock())
+    monkeypatch.setattr(ingester.vector_store, "ensure_collection", MagicMock())
     upsert_points = MagicMock()
-    monkeypatch.setattr(indexer.vector_store, "upsert_points", upsert_points)
-    monkeypatch.setattr(indexer.database, "is_document_changed", lambda *a, **k: False)
-    monkeypatch.setattr(indexer.database, "upsert_document", MagicMock())
-    monkeypatch.setattr(indexer.database, "save_ingestion_log", MagicMock())
-    monkeypatch.setattr(indexer, "load_documents", lambda p: ([_fake_doc()], []))
+    monkeypatch.setattr(ingester.vector_store, "upsert_points", upsert_points)
+    monkeypatch.setattr(ingester.database, "is_document_changed", lambda *a, **k: False)
+    monkeypatch.setattr(ingester.database, "upsert_document", MagicMock())
+    monkeypatch.setattr(ingester.database, "save_ingestion_log", MagicMock())
+    monkeypatch.setattr(ingester, "load_documents", lambda p: ([_fake_doc()], []))
     embed_chunks = MagicMock()
-    monkeypatch.setattr(indexer, "embed_chunks", embed_chunks)
+    monkeypatch.setattr(ingester, "embed_chunks", embed_chunks)
 
-    result = indexer.run_ingestion("x")
+    result = ingester.run_ingestion("x")
 
     assert result["files_skipped"] == 1
     assert result["files_processed"] == 0
@@ -80,22 +80,22 @@ def test_run_ingestion_skips_unchanged(monkeypatch):
 
 
 def test_run_ingestion_processes_changed(monkeypatch):
-    monkeypatch.setattr(indexer.vector_store, "ensure_collection", MagicMock())
+    monkeypatch.setattr(ingester.vector_store, "ensure_collection", MagicMock())
     upsert_points = MagicMock()
-    monkeypatch.setattr(indexer.vector_store, "upsert_points", upsert_points)
-    monkeypatch.setattr(indexer.database, "is_document_changed", lambda *a, **k: True)
-    monkeypatch.setattr(indexer.database, "upsert_document", MagicMock())
-    monkeypatch.setattr(indexer.database, "save_ingestion_log", MagicMock())
-    monkeypatch.setattr(indexer, "load_documents", lambda p: ([_fake_doc()], []))
+    monkeypatch.setattr(ingester.vector_store, "upsert_points", upsert_points)
+    monkeypatch.setattr(ingester.database, "is_document_changed", lambda *a, **k: True)
+    monkeypatch.setattr(ingester.database, "upsert_document", MagicMock())
+    monkeypatch.setattr(ingester.database, "save_ingestion_log", MagicMock())
+    monkeypatch.setattr(ingester, "load_documents", lambda p: ([_fake_doc()], []))
 
     fake_chunk = Chunk(
         chunk_id="shipping.md_0", doc_filename="shipping.md", doc_type="md",
         content_hash="hash1", section="General", chunk_index=0, text="chunk text",
     )
-    monkeypatch.setattr(indexer, "chunk_document", lambda doc: [fake_chunk])
-    monkeypatch.setattr(indexer, "embed_chunks", lambda chunks: [(fake_chunk, [0.1] * 8)])
+    monkeypatch.setattr(ingester, "chunk_document", lambda doc: [fake_chunk])
+    monkeypatch.setattr(ingester, "embed_chunks", lambda chunks: [(fake_chunk, [0.1] * 8)])
 
-    result = indexer.run_ingestion("x")
+    result = ingester.run_ingestion("x")
 
     assert result["files_processed"] == 1
     assert result["files_skipped"] == 0

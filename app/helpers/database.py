@@ -228,3 +228,22 @@ def update_customer_default_address(email: str, fields: dict) -> dict:
     except Exception:
         logger.error("failed to update customer address: %s", email, exc_info=True)
         raise
+
+
+# ── Orders (self-service cancellation) ───────────────────────────────────────
+
+def cancel_order(order_id: str) -> dict:
+    """Set an order's status to 'Cancelled'. Returns the updated row."""
+    try:
+        result = (
+            get_db().table("orders")
+            .update({"status": "Cancelled"})
+            .eq("order_id", order_id)
+            .execute()
+        )
+        logger.info("order cancelled: %s", order_id)
+        return result.data[0] if result.data else {}
+    except Exception:
+        logger.error("failed to cancel order: %s", order_id, exc_info=True)
+        raise
+

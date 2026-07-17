@@ -44,7 +44,7 @@ from app.llm.prompts import SYSTEM_PROMPT, USER_PROMPT, SUPPORT_CONTACT
 from app.vectorstore import store as vector_store
 from app.schemas import Citation
 from app.helpers.langfuse import get_langfuse
-from app.helpers import data_lookup, date_facts
+from app.helpers import order_lookup, date_facts
 from app.pipelines.query import hyde
 from app.pipelines.retrieval import gates
 from app.helpers.logger import get_logger
@@ -83,7 +83,7 @@ def generate_response(query: str, context: dict) -> dict:
     span.end(output=f"blended vector dim={len(search_vector)}")
 
     # ── ② Load direct data from Supabase: invoices + orders + products ────────
-    db_invoices     = data_lookup.get_invoices_for_user(user_email) if user_email else []
+    db_invoices     = order_lookup.get_invoices_for_user(user_email) if user_email else []
     live_data_parts = _load_live_data(user_email, entities)
     has_direct_data = bool(db_invoices or live_data_parts)
     logger.debug("P3 direct data: %d invoices, %d live parts", len(db_invoices), len(live_data_parts))
@@ -190,16 +190,16 @@ def generate_response(query: str, context: dict) -> dict:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _load_live_data(user_email: str, entities: dict) -> list[str]:
-    """Load relevant user/order/product data from JSON files based on context."""
+    """Load relevant user/order/product data from Supabase based on context."""
     parts: list[str] = []
     if not user_email:
         return parts
 
-    user_orders = data_lookup.get_orders_for_user(user_email)
+    user_orders = order_lookup.get_orders_for_user(user_email)
     if user_orders:
         order_id = entities.get("order_id")
         if order_id:
-            order = data_lookup.get_order_by_id(order_id, user_email)
+            order = order_lookup.get_order_by_id(order_id, user_email)
             if order:
                 order_block = f"[ORDER: {order_id}]\n{_json.dumps(order, indent=2)}"
                 order_timing = date_facts.order_date_facts(order)
@@ -231,7 +231,7 @@ def _load_live_data(user_email: str, entities: dict) -> list[str]:
 
     product_name = entities.get("product_name")
     if product_name:
-        product = data_lookup.get_product_by_name(product_name)
+        product = order_lookup.get_product_by_name(product_name)
         if product:
             parts.append(f"[PRODUCT: {product_name}]\n{_json.dumps(product, indent=2)}")
             logger.debug("loaded product: %s", product_name)

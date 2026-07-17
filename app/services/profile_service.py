@@ -14,7 +14,7 @@ Public API:
 
 import json
 
-from app.helpers import database, data_lookup
+from app.helpers import database, order_lookup
 from app.llm import lightweight
 from app.llm.prompts import DETECT_PROMPT
 from app.helpers.logger import get_logger
@@ -87,7 +87,7 @@ def render_profile(email: str) -> str:
     else:
         lines.append("- **Address:** —")
 
-    orders = data_lookup.get_orders_for_user(email)
+    orders = order_lookup.get_orders_for_user(email)
     if orders:
         lines.append("\n**Recent orders:**")
         for o in orders[:5]:

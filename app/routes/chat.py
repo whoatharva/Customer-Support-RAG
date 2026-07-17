@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from app.routes.deps import verify_jwt
-from app.schemas import ChatRequest, ChatResponse, RefundDecisionResponse
+from app.schemas import ChatRequest, ChatResponse, RefundDecisionResponse, CancelOrderRequest, CancelOrderResponse
 from app.workflow.chat_workflow import run as workflow_run
+from app.services import order_cancellation
 from app.helpers.logger import get_logger
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -43,3 +44,26 @@ async def analyze_image(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     return RefundDecisionResponse(**result)
+
+
+@router.post("/cancel-order", response_model=CancelOrderResponse)
+def cancel_order(body: CancelOrderRequest, user_email: str = Depends(verify_jwt)):
+    """Cancel an order if its current status allows it.
+
+    Business logic is handled entirely in order_cancellation (no LLM).
+    This endpoint is called by the Chainlit 'Confirm' button after the chat
+    service surfaced the confirmation prompt.
+    """
+    logger.info("POST /chat/cancel-order | order=%s user=%s", body.order_id, user_email)
+    result = order_cancellation.cancel_order(body.order_id, user_email)
+    if not result.success:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=result.message,
+        )
+    return CancelOrderResponse(
+        success=result.success,
+        order_id=result.order_id,
+        previous_status=result.previous_status,
+        message=result.message,
+    )

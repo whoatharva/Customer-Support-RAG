@@ -1,23 +1,25 @@
 """Orchestrates a single chat turn: Pipeline 2 → Pipeline 3 → persist.
 
 Flow:
-  1. Call P2 (process_query) → intent, entities, rewritten query.
-  2. Call P3 (generate_response) → answer, citations, confidence.
-  3. Persist turn to Supabase (durable history for P2 rewrite + UI).
-  4. Update Langfuse trace with final output + metadata.
+  1. Order cancellation check (deterministic, no LLM) — intercepts before RAG.
+  2. Call P2 (process_query) → intent, entities, rewritten query.
+  3. Call P3 (generate_response) → answer, citations, confidence.
+  4. Persist turn to Supabase (durable history for P2 rewrite + UI).
+  5. Update Langfuse trace with final output + metadata.
 """
+
+import json
 
 from app.schemas import ChatRequest, ChatResponse
 from app.pipelines.query.processor import process_query
-from app.pipelines.retrieval.engine import generate_response
+from app.pipelines.retrieval.retriever import generate_response
 from app.services import profile_service
+from app.services import order_cancellation
 from app.helpers import database
 from app.llm import lightweight
 from app.llm.prompts import SPLIT_PROMPT
 from app.helpers.langfuse import get_langfuse
 from app.helpers.logger import get_logger
-
-import json
 
 logger = get_logger(__name__)
 
@@ -37,6 +39,10 @@ def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
         "chat turn | session=%s user=%s query_len=%d",
         request.session_id, user_email, len(request.query),
     )
+
+    # ── Order cancellation branch (deterministic, no LLM) ──────────────────
+    if user_email and order_cancellation.matches_cancel_keywords(request.query):
+        return _handle_cancel(request, user_email)
 
     # ── Multi-intent branch (gated) ──────────────────────────────────────────
     # Cheap heuristic first; only if it fires do we pay for the LLM splitter.
@@ -95,6 +101,52 @@ def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
         should_escalate=result["should_escalate"],
         total_tokens=result.get("total_tokens"),
     )
+
+
+def _handle_cancel(request: ChatRequest, user_email: str) -> ChatResponse:
+    """Handle an order cancellation intent entirely in Python — no LLM, no RAG.
+
+    Detects whether the user named an order ID or a product, resolves the order,
+    checks cancellability, then returns either:
+      - A Confirm/Cancel prompt (action="order_cancel") if the order can be cancelled.
+      - A direct rejection message if it cannot.
+    The actual DB write happens only when the user clicks Confirm in the UI.
+    """
+    intent = order_cancellation.detect_cancel_intent(request.query)
+    order = order_cancellation.find_order_to_cancel(intent, user_email)
+
+    if order is None:
+        answer = (
+            "I couldn't find an order matching that description on your account. "
+            "Please check your order ID or item name and try again."
+        )
+        _persist_turn(request.session_id, user_email, request.query, answer)
+        return ChatResponse(answer=answer, citations=[], confidence=1.0)
+
+    order_id = order.get("order_id", "")
+    current_status = order.get("status", "")
+    items = ", ".join(i.get("name", "") for i in order.get("items", []))
+
+    if current_status in order_cancellation.CANCELLABLE_STATUSES:
+        answer = (
+            f"I found your order **{order_id}**"
+            + (f" ({items})" if items else "")
+            + f", currently **{current_status}**. "
+            "Do you want to cancel it?"
+        )
+        _persist_turn(request.session_id, user_email, request.query, answer)
+        return ChatResponse(
+            answer=answer,
+            citations=[],
+            confidence=1.0,
+            action="order_cancel",
+            action_payload={"order_id": order_id, "previous_status": current_status},
+        )
+
+    # Non-cancellable — look up the rejection reason from the service.
+    result = order_cancellation.cancel_order(order_id, user_email)
+    _persist_turn(request.session_id, user_email, request.query, result.message)
+    return ChatResponse(answer=result.message, citations=[], confidence=1.0)
 
 
 def _classify_sub(sub: str, user_email: str) -> dict:
