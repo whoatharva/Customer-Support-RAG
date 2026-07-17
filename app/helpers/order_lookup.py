@@ -6,7 +6,7 @@ Public API:
     get_product_by_name(name)             -> dict | None   # case-insensitive substring
     get_invoices_for_user(email)          -> list[dict]
 
-Called by: app/pipelines/retrieval/engine.py  (_load_live_data)
+Called by: app/pipelines/retrieval/retriever.py  (_load_live_data)
 """
 
 from app.helpers.database import get_db, get_invoices_for_user  # noqa: F401 — re-exported

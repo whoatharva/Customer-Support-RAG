@@ -107,3 +107,18 @@ class RefundDecisionResponse(BaseModel):
     confidence: float
     issue_type: str
     customer_message: str
+
+
+# ── Orders (self-service cancellation) ───────────────────────────────────────
+
+class CancelOrderRequest(BaseModel):
+    session_id: str
+    order_id: str
+
+
+class CancelOrderResponse(BaseModel):
+    success: bool
+    order_id: str
+    previous_status: str
+    message: str
+
