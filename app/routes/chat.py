@@ -3,12 +3,11 @@ from app.routes.deps import verify_jwt
 from app.schemas import ChatRequest, ChatResponse, RefundDecisionResponse, CancelOrderRequest, CancelOrderResponse
 from app.workflow.chat_workflow import run as workflow_run
 from app.services import order_cancellation
+from app.pipelines.vision.verifier import SUPPORTED_MIME_TYPES
 from app.helpers.logger import get_logger
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = get_logger(__name__)
-
-_SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 @router.post("/query", response_model=ChatResponse)
@@ -29,7 +28,7 @@ async def analyze_image(
     from app.pipelines.vision.analyzer import process_refund_claim
 
     mime_type = file.content_type or "image/jpeg"
-    if mime_type not in _SUPPORTED_IMAGE_TYPES:
+    if mime_type not in SUPPORTED_MIME_TYPES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=f"Unsupported image type: {mime_type}. Use JPEG, PNG, or WebP.",

@@ -1,0 +1,17 @@
+{
+  "timestamp": "20260716_103335",
+  "models": {
+    "judge_llm": "gpt-4.1",
+    "judge_embeddings": "text-embedding-3-small"
+  },
+  "num_cases_scored": 3,
+  "num_failures": 0,
+  "failures": [],
+  "mean_scores": {
+    "answer_relevancy": 0.9207908980965316,
+    "faithfulness": 0.35398428731762066,
+    "context_recall": 0.38888888888888884,
+    "context_precision": 0.8693121692754585,
+    "answer_correctness": 0.742270617606052
+  }
+}

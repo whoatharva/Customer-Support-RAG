@@ -30,32 +30,6 @@ for _k, _v in _DUMMY_ENV.items():
 
 import pytest
 
-from app.pipelines.ingestion.loader import RawDocument
-
-
-@pytest.fixture
-def sample_raw_doc() -> RawDocument:
-    """A small multi-section markdown document for chunking/ingestion tests."""
-    content = (
-        "# Shipping Policy\n\n"
-        "We offer standard and express shipping across the country. "
-        "Standard shipping takes four to seven business days and is free on "
-        "orders above a threshold amount. Express shipping is faster.\n\n"
-        "## Free Shipping\n\n"
-        "Free shipping applies automatically once your cart crosses the "
-        "minimum order value at checkout without any coupon code required.\n\n"
-        "## Address Changes\n\n"
-        "You may change the delivery address only before the order is "
-        "dispatched to the courier partner for last-mile delivery.\n"
-    )
-    return RawDocument(
-        filepath="/tmp/shipping.md",
-        filename="shipping.md",
-        doc_type="md",
-        content=content,
-        content_hash="deadbeef",
-    )
-
 
 @pytest.fixture
 def make_scored_point():

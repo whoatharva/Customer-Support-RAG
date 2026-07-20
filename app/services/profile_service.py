@@ -12,10 +12,10 @@ Public API:
     apply(email, field, values)      -> str    # perform the write, return confirmation
 """
 
-import json
-
 from app.helpers import database, order_lookup
+from app.helpers.text import contains_any
 from app.llm import lightweight
+from app.llm.parsing import parse_json_lenient
 from app.llm.prompts import DETECT_PROMPT
 from app.helpers.logger import get_logger
 
@@ -30,16 +30,14 @@ PROFILE_KEYWORDS = (
 
 
 def matches_keywords(query: str) -> bool:
-    q = query.lower()
-    return any(k in q for k in PROFILE_KEYWORDS)
+    return contains_any(query, PROFILE_KEYWORDS)
 
 
 def detect(query: str) -> dict:
     """LLM classify into {action, field, values}. Safe default on any failure."""
     raw = lightweight.call(DETECT_PROMPT.format(query=query), max_tokens=200)
-    try:
-        parsed = json.loads(_strip_fences(raw))
-    except (json.JSONDecodeError, TypeError):
+    parsed = parse_json_lenient(raw, slice_from="{")
+    if not isinstance(parsed, dict):
         logger.warning("profile detect parse failed | raw=%r", raw)
         return {"action": "none", "field": None, "values": {}}
 
@@ -91,19 +89,23 @@ def render_profile(email: str) -> str:
     if orders:
         lines.append("\n**Recent orders:**")
         for o in orders[:5]:
-            items = ", ".join(i.get("name", "") for i in o.get("items", []))
+            items = order_lookup.format_order_items(o)
             lines.append(f"- `{o.get('order_id')}` — {o.get('status', 'n/a')}"
                          + (f" ({items})" if items else ""))
 
     return "\n".join(lines)
 
 
-def apply(email: str, field: str, values: dict) -> str:
-    """Validate then persist the change. Returns a user-facing confirmation."""
-    ok, error = validate(field, values)
-    if not ok:
-        return error
+def confirm_prompt(det: dict) -> str:
+    """Human-readable confirmation text for a pending profile update."""
+    if det["field"] == "phone":
+        return f"I'll update your phone number to **{det['values'].get('phone')}**. Confirm?"
+    changed = ", ".join(f"{k}: {v}" for k, v in det["values"].items())
+    return f"I'll update your address ({changed}). Confirm?"
 
+
+def apply(email: str, field: str, values: dict) -> str:
+    """Persist a change already checked with validate(). Returns a user-facing confirmation."""
     if field == "phone":
         database.update_customer_phone(email, values["phone"])
         return f"Done — your phone number is now **{values['phone']}**."
@@ -115,13 +117,3 @@ def apply(email: str, field: str, values: dict) -> str:
         return f"Done — your address has been updated ({changed})."
 
     return "I can only update your phone or address."
-
-
-def _strip_fences(text: str) -> str:
-    """Remove ```json ... ``` fences some models wrap JSON in."""
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.split("\n", 1)[-1]
-        if t.endswith("```"):
-            t = t[: t.rfind("```")]
-    return t.strip()

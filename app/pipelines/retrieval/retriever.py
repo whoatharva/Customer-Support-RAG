@@ -36,11 +36,10 @@ PIPELINE FLOW:
 """
 
 import json as _json
-from datetime import date as _date
 
 from app.config import settings
 from app.llm import client as llm
-from app.llm.prompts import SYSTEM_PROMPT, USER_PROMPT, SUPPORT_CONTACT
+from app.llm.prompts import SYSTEM_PROMPT, USER_PROMPT, ESCALATION_ANSWER
 from app.vectorstore import store as vector_store
 from app.schemas import Citation
 from app.helpers.langfuse import get_langfuse
@@ -50,11 +49,6 @@ from app.pipelines.retrieval import gates
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
-
-_ESCALATION_ANSWER = (
-    f"I'm sorry, I wasn't able to find relevant information to answer your question. "
-    f"Please contact our support team at {SUPPORT_CONTACT} for further assistance."
-)
 
 
 def generate_response(query: str, context: dict) -> dict:
@@ -102,43 +96,10 @@ def generate_response(query: str, context: dict) -> dict:
         return _escalate(citations=[])
 
     # ── ⑤ Assemble context: date facts → invoices → live data → FAQ chunks ────
-    context_parts: list[str] = []
-    context_parts.append(date_facts.today_facts())
-    for inv in db_invoices:
-        context_parts.append(f"[INVOICE: {inv['invoice_id']}]\n{inv['content']}")
-    context_parts.extend(live_data_parts)
-    for r in results:
-        p = r.payload
-        context_parts.append(f"[{p['doc_filename']} / {p.get('section', '')}]\n{p['text']}")
-    full_context = "\n\n---\n\n".join(context_parts)
+    full_context = _assemble_context(db_invoices, live_data_parts, results)
 
     # ── ⑥ LLM generation (Azure OpenAI gpt-4.1) ──────────────────────────────
-    today = _date.today().strftime("%d %B %Y")
-    system_msg = SYSTEM_PROMPT.format(today=today)
-    user_msg = USER_PROMPT.format(context=full_context, query=query)
-    generation = trace.generation(
-        name="p3_generate",
-        model=settings.azure_openai_deployment_name,
-        input=user_msg[:500],
-    )
-    response = llm.chat([
-        {"role": "system", "content": system_msg},
-        {"role": "user", "content": user_msg},
-    ])
-    answer = response["choices"][0]["message"]["content"].strip()
-    _usage = response.get("usage") or {}
-    generation.end(
-        output=answer[:300],
-        usage={
-            "input":  _usage.get("prompt_tokens", 0),
-            "output": _usage.get("completion_tokens", 0),
-            "total":  _usage.get("total_tokens", 0),
-        },
-    )
-    logger.info(
-        "P3 generated answer: %d chars | tokens in=%s out=%s",
-        len(answer), _usage.get("prompt_tokens"), _usage.get("completion_tokens"),
-    )
+    answer, _usage = _generate_answer(trace, full_context, query)
 
     # ── ⑦ GATE 2: answer relevancy check (Gemini/Groq) ───────────────────────
     span = trace.span(name="p3_answer_gate", input=f"query={query[:60]}")
@@ -151,26 +112,11 @@ def generate_response(query: str, context: dict) -> dict:
         return _escalate(citations=_build_faq_citations(results))
 
     # ── ⑧ Citations: invoices first, then scored FAQ chunks ──────────────────
-    citations: list[Citation] = [
-        Citation(
-            chunk_id=f"invoice_{inv['invoice_id']}",
-            source_document=f"INVOICE: {inv['invoice_id']}",
-            section="Invoice",
-            text=inv["content"][:200],
-            score=1.0,
-        )
-        for inv in db_invoices
-    ]
+    citations = _build_invoice_citations(db_invoices)
     citations.extend(_build_faq_citations(results))
 
     # ── ⑧ Composite confidence score ─────────────────────────────────────────
-    # Direct data (invoice/orders) boosts confidence — we have authoritative info.
-    # Without direct data, confidence is the raw Qdrant similarity score.
-    if has_direct_data:
-        confidence = round(min(0.5 * top_score + 0.5, 1.0), 2)
-    else:
-        confidence = round(min(top_score, 1.0), 2)
-
+    confidence = _compute_confidence(top_score, has_direct_data)
     should_escalate = confidence < settings.confidence_threshold
     trace.score(name="confidence", value=confidence)
     logger.info(
@@ -188,6 +134,68 @@ def generate_response(query: str, context: dict) -> dict:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _assemble_context(db_invoices: list, live_data_parts: list[str], results: list) -> str:
+    """Combine date facts, invoices, live order/product data, and FAQ chunks."""
+    context_parts: list[str] = [date_facts.today_facts()]
+    for inv in db_invoices:
+        context_parts.append(f"[INVOICE: {inv['invoice_id']}]\n{inv['content']}")
+    context_parts.extend(live_data_parts)
+    for r in results:
+        p = r.payload
+        context_parts.append(f"[{p['doc_filename']} / {p.get('section', '')}]\n{p['text']}")
+    return "\n\n---\n\n".join(context_parts)
+
+
+def _generate_answer(trace, full_context: str, query: str) -> tuple[str, dict]:
+    """Call the LLM with assembled context; return (answer, usage) and log the generation."""
+    system_msg = SYSTEM_PROMPT.format(today=date_facts.today_str())
+    user_msg = USER_PROMPT.format(context=full_context, query=query)
+    generation = trace.generation(
+        name="p3_generate",
+        model=settings.azure_openai_deployment_name,
+        input=user_msg[:500],
+    )
+    response = llm.chat([
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_msg},
+    ])
+    answer = response["choices"][0]["message"]["content"].strip()
+    usage = response.get("usage") or {}
+    generation.end(
+        output=answer[:300],
+        usage={
+            "input":  usage.get("prompt_tokens", 0),
+            "output": usage.get("completion_tokens", 0),
+            "total":  usage.get("total_tokens", 0),
+        },
+    )
+    logger.info(
+        "P3 generated answer: %d chars | tokens in=%s out=%s",
+        len(answer), usage.get("prompt_tokens"), usage.get("completion_tokens"),
+    )
+    return answer, usage
+
+
+def _build_invoice_citations(db_invoices: list) -> list[Citation]:
+    return [
+        Citation(
+            chunk_id=f"invoice_{inv['invoice_id']}",
+            source_document=f"INVOICE: {inv['invoice_id']}",
+            section="Invoice",
+            text=inv["content"][:200],
+            score=1.0,
+        )
+        for inv in db_invoices
+    ]
+
+
+def _compute_confidence(top_score: float, has_direct_data: bool) -> float:
+    """Direct DB data boosts confidence; otherwise use the raw Qdrant similarity."""
+    if has_direct_data:
+        return round(min(0.5 * top_score + 0.5, 1.0), 2)
+    return round(min(top_score, 1.0), 2)
+
 
 def _load_live_data(user_email: str, entities: dict) -> list[str]:
     """Load relevant user/order/product data from Supabase based on context."""
@@ -254,7 +262,7 @@ def _build_faq_citations(results: list) -> list[Citation]:
 
 def _escalate(citations: list[Citation]) -> dict:
     return {
-        "answer": _ESCALATION_ANSWER,
+        "answer": ESCALATION_ANSWER,
         "citations": citations,
         "confidence": 0.0,
         "should_escalate": True,

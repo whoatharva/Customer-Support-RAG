@@ -46,6 +46,33 @@ def _run(fn):
     return asyncio.to_thread(fn)
 
 
+async def _safe(fn, label: str, *, warn: bool = False, default=None):
+    """Run a zero-arg Supabase lambda in a thread; log and return `default` on failure.
+
+    Uses logger.warning when `warn` is True (writes we care about), else logger.debug.
+    """
+    try:
+        return await _run(fn)
+    except Exception:
+        (logger.warning if warn else logger.debug)("%s failed", label, exc_info=True)
+        return default
+
+
+async def _fetch_one(table: str, columns: str, label: str, **eq) -> Optional[dict]:
+    """SELECT `columns` FROM `table` WHERE all eq-filters match, LIMIT 1.
+
+    Returns the first row dict or None (also None on any DB error, logged at debug).
+    """
+    def _query():
+        q = get_db().table(table).select(columns)
+        for col, val in eq.items():
+            q = q.eq(col, val)
+        return q.limit(1).execute()
+
+    result = await _safe(_query, label)
+    return result.data[0] if result and result.data else None
+
+
 class SupabaseDataLayer(BaseDataLayer):
     """Chainlit BaseDataLayer implementation backed by our Supabase project."""
 
@@ -67,21 +94,17 @@ class SupabaseDataLayer(BaseDataLayer):
     async def create_user(self, user: User) -> Optional[PersistedUser]:
         # Look up the DB record to get the stable UUID, but copy metadata from
         # the original user so the session retains the token and role.
-        try:
-            result = await _run(
-                lambda: get_db().table("users").select("id, email, created_at")
-                    .eq("email", user.identifier).limit(1).execute()
+        row = await _fetch_one(
+            "users", "id, email, created_at", "create_user lookup",
+            email=user.identifier,
+        )
+        if row:
+            return PersistedUser(
+                id=str(row["id"]),
+                identifier=row["email"],
+                createdAt=str(row.get("created_at", _now())),
+                metadata=user.metadata,  # preserve token + role from auth_callback
             )
-            if result.data:
-                row = result.data[0]
-                return PersistedUser(
-                    id=str(row["id"]),
-                    identifier=row["email"],
-                    createdAt=str(row.get("created_at", _now())),
-                    metadata=user.metadata,  # preserve token + role from auth_callback
-                )
-        except Exception:
-            logger.debug("create_user lookup failed for %s", user.identifier, exc_info=True)
         # Fallback: return a minimal PersistedUser so the session is not blocked.
         return PersistedUser(
             id=user.identifier,
@@ -226,30 +249,16 @@ class SupabaseDataLayer(BaseDataLayer):
 
         # Resolve email → DB UUID so list_threads filtering by UUID works
         if user_email and not user_uuid:
-            try:
-                res = await _run(
-                    lambda: get_db().table("users").select("id")
-                        .eq("email", user_email).limit(1).execute()
-                )
-                if res.data:
-                    user_uuid = str(res.data[0]["id"])
-            except Exception:
-                user_uuid = user_email  # fallback: store email as id
+            urow = await _fetch_one("users", "id", "update_thread uuid resolve", email=user_email)
+            user_uuid = str(urow["id"]) if urow else user_email  # fallback: store email as id
 
         # Merge with the existing row: Chainlit calls update_thread multiple times
         # per session (start, rename, disconnect) each passing only a subset of
         # fields. A blind full-row upsert would reset the name to "New Conversation"
         # and wipe session_id metadata. So only overwrite fields explicitly passed.
-        existing: dict = {}
-        try:
-            res = await _run(
-                lambda: get_db().table("cl_threads").select("*")
-                    .eq("id", thread_id).limit(1).execute()
-            )
-            if res.data:
-                existing = res.data[0]
-        except Exception:
-            logger.debug("update_thread existing-row read failed: %s", thread_id, exc_info=True)
+        existing = await _fetch_one(
+            "cl_threads", "*", "update_thread existing-row read", id=thread_id,
+        ) or {}
 
         # Treat an explicit "New Conversation" as "no name" — Chainlit's internal
         # calls pass that default and would otherwise clobber a real title.

@@ -1,7 +1,7 @@
 """End-to-end chat workflow.
 
 Wraps the chat service with a fallback so the API never returns a 500.
-If confidence is below the threshold, the escalation flag is set.
+The escalation flag is set by the retriever when confidence is below the threshold.
 Any unexpected exception returns a safe fallback response.
 
 Cost tracking:
@@ -12,18 +12,12 @@ Cost tracking:
 """
 
 from app.helpers.langfuse import get_langfuse
-from app.config import settings
-from app.llm.prompts import SUPPORT_CONTACT
+from app.llm.prompts import ESCALATION_ANSWER
 from app.schemas import ChatRequest, ChatResponse
 from app.services.chat_service import handle_chat
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
-
-_FALLBACK_ANSWER = (
-    f"I'm sorry, I wasn't able to find a confident answer to your question. "
-    f"Please contact our support team at {SUPPORT_CONTACT} for further assistance."
-)
 
 
 def run(request: ChatRequest, user_email: str = "") -> ChatResponse:
@@ -31,12 +25,9 @@ def run(request: ChatRequest, user_email: str = "") -> ChatResponse:
     try:
         response = handle_chat(request, user_email=user_email)
 
-        if response.confidence < settings.confidence_threshold:
-            response.should_escalate = True
-
         # Log total token count as a score so Langfuse can surface expensive turns.
         # Per-generation costs (USD) are tracked automatically via trace.generation()
-        # in engine.py — this score is for quick filtering by token volume.
+        # in retriever.py — this score is for quick filtering by token volume.
         _log_cost_score(request.session_id, response)
 
         return response
@@ -47,7 +38,7 @@ def run(request: ChatRequest, user_email: str = "") -> ChatResponse:
             request.session_id, request.query[:80], exc_info=True,
         )
         return ChatResponse(
-            answer=_FALLBACK_ANSWER,
+            answer=ESCALATION_ANSWER,
             citations=[],
             confidence=0.0,
             should_escalate=True,

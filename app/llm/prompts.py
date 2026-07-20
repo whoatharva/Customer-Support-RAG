@@ -4,6 +4,12 @@
 
 SUPPORT_CONTACT = "support@ourstore.com or use the live chat (Mon–Sat, 9am–8pm IST)"
 
+# Shared escalation/fallback answer used by the retriever and the workflow wrapper.
+ESCALATION_ANSWER = (
+    f"I'm sorry, I wasn't able to find a confident answer to your question. "
+    f"Please contact our support team at {SUPPORT_CONTACT} for further assistance."
+)
+
 QUERY_REWRITE_TEMPLATE = """
 Given the conversation history and the latest user message, rewrite the user's question
 as a fully self-contained query suitable for semantic search. Resolve pronouns and ellipsis.
@@ -15,6 +21,32 @@ User message:
 {query}
 
 Rewritten query:
+""".strip()
+
+# Combined P2 prompt: rewrite + intent + entities in a single LLM call.
+PROCESS_QUERY_PROMPT = """
+You process a customer support query in one pass. Respond with ONLY valid JSON — no extra text.
+
+Conversation history (may be empty):
+{history}
+
+User message: {query}
+
+Tasks:
+1. "rewritten_query": rewrite the user message as a fully self-contained query suitable for
+   semantic search (resolve pronouns/ellipsis using the history). If the message is already
+   self-contained or the history is empty, return it unchanged.
+2. Classify intent and extract entities.
+
+JSON format:
+{{
+  "rewritten_query": "<self-contained query>",
+  "intent": "<one of: return_request | shipping_inquiry | warranty_inquiry | payment_inquiry | account_inquiry | general_policy | other>",
+  "entities": {{
+    "order_id": "<order id string or null>",
+    "product_name": "<product name or null>"
+  }}
+}}
 """.strip()
 
 SYSTEM_PROMPT = """
@@ -59,7 +91,6 @@ JSON format:
   "intent": "<one of: return_request | shipping_inquiry | warranty_inquiry | payment_inquiry | account_inquiry | general_policy | other>",
   "entities": {{
     "order_id": "<order id string or null>",
-    "invoice_id": "<invoice id string or null>",
     "product_name": "<product name or null>"
   }}
 }}

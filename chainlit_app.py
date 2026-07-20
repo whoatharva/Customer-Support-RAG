@@ -2,15 +2,14 @@ import os
 import shutil
 import tempfile
 import uuid
-from datetime import datetime, timedelta, timezone
 import httpx
-from jose import jwt
 import chainlit as cl
 import chainlit.data as cl_data
 from dotenv import load_dotenv
 from app.llm.prompts import SUPPORT_CONTACT
 from app.chainlit_data_layer import SupabaseDataLayer
 from app.config import settings
+from app.helpers.tokens import encode_token
 
 load_dotenv()
 
@@ -22,12 +21,7 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def _mint_jwt(subject: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expiry_minutes)
-    return jwt.encode(
-        {"sub": subject, "exp": expire, "type": "access"},
-        settings.jwt_secret,
-        algorithm=settings.jwt_algorithm,
-    )
+    return encode_token(subject, settings.jwt_expiry_minutes, "access")
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -302,15 +296,7 @@ async def _handle_admin_upload(message: cl.Message):
     try:
         for f in files:
             shutil.copy(f.path, os.path.join(tmp_dir, f.name))
-        data = await call_ingest(tmp_dir)
-        msg.content = format_ingest_result(data)
-        await msg.update()
-    except httpx.HTTPStatusError as e:
-        msg.content = f"API error {e.response.status_code}: {e.response.text}"
-        await msg.update()
-    except Exception as e:
-        msg.content = f"Error: {e}"
-        await msg.update()
+        await _run_ingest(msg, tmp_dir)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -430,6 +416,20 @@ async def on_browse_up(action: cl.Action):
     await show_folder_browser(action.payload.get("path", ""))
 
 
+async def _run_ingest(msg: cl.Message, path: str):
+    """Call the ingest API and update `msg` with the result or a friendly error."""
+    try:
+        data = await call_ingest(path)
+        msg.content = format_ingest_result(data)
+    except FileNotFoundError:
+        msg.content = f"Path not found: `{path}`"
+    except httpx.HTTPStatusError as e:
+        msg.content = f"API error {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        msg.content = f"Error: {e}"
+    await msg.update()
+
+
 @cl.action_callback("browse_file")
 async def on_browse_file(action: cl.Action):
     path = action.payload.get("path", "")
@@ -441,16 +441,7 @@ async def on_browse_ingest(action: cl.Action):
     path = action.payload.get("path", "")
     msg = cl.Message(content=f"Ingesting folder `{path}`...")
     await msg.send()
-    try:
-        data = await call_ingest(path)
-        msg.content = format_ingest_result(data)
-        await msg.update()
-    except httpx.HTTPStatusError as e:
-        msg.content = f"API error {e.response.status_code}: {e.response.text}"
-        await msg.update()
-    except Exception as e:
-        msg.content = f"Error: {e}"
-        await msg.update()
+    await _run_ingest(msg, path)
 
 
 @cl.action_callback("confirm_profile")
@@ -482,14 +473,13 @@ async def on_cancel_profile(action: cl.Action):
 async def on_confirm_order_cancel(action: cl.Action):
     payload = action.payload or {}
     await action.remove()
-    session_id = cl.user_session.get("session_id")
     msg = cl.Message(content="Cancelling your order...")
     await msg.send()
     try:
         res = await authed_request(
             "POST",
             "/chat/cancel-order",
-            json={"session_id": session_id, "order_id": payload.get("order_id", "")},
+            json={"order_id": payload.get("order_id", "")},
         )
         if res.status_code == 409:
             msg.content = res.json().get("detail", "That order could not be cancelled.")
@@ -535,19 +525,7 @@ async def on_message(message: cl.Message):
         path = parts[1].strip()
         msg = cl.Message(content=f"Ingesting `{path}`...")
         await msg.send()
-        try:
-            data = await call_ingest(path)
-            msg.content = format_ingest_result(data)
-            await msg.update()
-        except FileNotFoundError:
-            msg.content = f"Path not found: `{path}`"
-            await msg.update()
-        except httpx.HTTPStatusError as e:
-            msg.content = f"API error {e.response.status_code}: {e.response.text}"
-            await msg.update()
-        except Exception as e:
-            msg.content = f"Error: {e}"
-            await msg.update()
+        await _run_ingest(msg, path)
 
     elif text == "/status":
         msg = cl.Message(content="Fetching ingestion history...")

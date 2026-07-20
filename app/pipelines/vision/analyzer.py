@@ -134,12 +134,9 @@ def _finalize(
 
     # Persist the refund turn to chat_messages so a follow-up question (e.g. "when will
     # it get refunded") has the approved/rejected decision as conversation context.
-    try:
-        database.ensure_chat_session(session_id, user_email)
-        database.save_chat_message(session_id, "user", f"[Refund claim via photo] {claim}")
-        database.save_chat_message(session_id, "assistant", customer_message)
-    except Exception:
-        logger.error("failed to persist refund turn to chat history | user=%s", user_email, exc_info=True)
+    database.persist_chat_turn(
+        session_id, user_email, f"[Refund claim via photo] {claim}", customer_message
+    )
 
     logger.info("refund decision=%s by=%s | user=%s", decision, decided_by, user_email)
     return {

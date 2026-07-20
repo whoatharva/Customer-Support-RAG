@@ -36,24 +36,20 @@ def get_blended_vector(query: str) -> list[float]:
 
     Falls back to plain query embedding if HyDE generation fails.
     """
-    # Step 1: embed the original query (always happens)
-    query_vector = llm.embed([query])[0]
-    logger.debug("HyDE: query embedded (dim=%d)", len(query_vector))
-
-    # Step 2: generate a hypothetical answer via lightweight LLM
+    # Step 1: generate a hypothetical answer via lightweight LLM
     prompt = HYDE_PROMPT.format(query=query)
     hypothetical_answer = lightweight.call(prompt, max_tokens=120)
 
     if not hypothetical_answer:
         logger.warning("HyDE: hypothetical answer generation failed — using plain query vector")
-        return query_vector
+        return llm.embed([query])[0]
 
     logger.debug("HyDE: hypothetical answer = %r", hypothetical_answer[:80])
 
-    # Step 3: embed the hypothetical answer
-    hyde_vector = llm.embed([hypothetical_answer])[0]
+    # Step 2: embed query + hypothetical answer in ONE batched API call
+    query_vector, hyde_vector = llm.embed([query, hypothetical_answer])
 
-    # Step 4: blend and normalise
+    # Step 3: blend and normalise
     blended = [settings.hyde_query_weight * q + settings.hyde_vector_weight * h for q, h in zip(query_vector, hyde_vector)]
     magnitude = sum(x * x for x in blended) ** 0.5
     if magnitude == 0:

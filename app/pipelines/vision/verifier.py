@@ -8,12 +8,11 @@ Kept deliberately thin and swappable — the orchestrator (analyzer.py) owns the
 policy; this module only produces evidence.
 """
 
-import json
-import re
 from dataclasses import dataclass
 
 from app.config import settings
 from app.llm import vision as vision_llm
+from app.llm.parsing import parse_json_lenient
 from app.llm.prompts import REFUND_VERIFICATION_PROMPT
 from app.helpers.logger import get_logger
 
@@ -69,10 +68,8 @@ def _validate_image(image_bytes: bytes, mime_type: str) -> None:
 
 def _parse_response(raw: str) -> VerificationResult:
     """Extract JSON from model output. Safe fallback routes to reject/HIL, never crashes."""
-    json_str = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError:
+    data = parse_json_lenient(raw, slice_from="{")
+    if not isinstance(data, dict):
         logger.warning("vision verifier returned non-JSON: %s", raw[:200])
         return VerificationResult(
             authentic=False,

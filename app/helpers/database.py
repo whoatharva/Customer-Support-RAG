@@ -35,6 +35,11 @@ def get_db() -> Client:
     return _client
 
 
+def first_row(result, default=None):
+    """First row of a Supabase query result, or `default` when empty."""
+    return result.data[0] if result.data else default
+
+
 # ── Documents ─────────────────────────────────────────────────────────────────
 
 def is_document_changed(filename: str, content_hash: str) -> bool:
@@ -99,7 +104,7 @@ def create_user(name: str, email: str, password_hash: str) -> dict:
 
 def get_user_by_email(email: str) -> dict | None:
     result = get_db().table("users").select("*").eq("email", email).eq("is_active", True).execute()
-    return result.data[0] if result.data else None
+    return first_row(result)
 
 
 # ── Chat history ──────────────────────────────────────────────────────────────
@@ -123,26 +128,27 @@ def save_chat_message(session_id: str, role: str, content: str):
 
 
 def get_chat_history_db(session_id: str, limit: int = 50) -> list[dict]:
+    """Return the most recent `limit` messages, oldest first."""
     result = (
         get_db()
         .table("chat_messages")
         .select("role, content, created_at")
         .eq("session_id", session_id)
-        .order("created_at", desc=False)
+        .order("created_at", desc=True)
         .limit(limit)
         .execute()
     )
-    return result.data
+    return list(reversed(result.data))
 
 
-def get_invoices_for_user(email: str) -> list[dict]:
-    result = (
-        get_db().table("invoices")
-        .select("invoice_id, order_id, content")
-        .eq("user_email", email)
-        .execute()
-    )
-    return result.data or []
+def persist_chat_turn(session_id: str, user_email: str, user_msg: str, assistant_msg: str):
+    """Best-effort: store one user/assistant exchange (never raises)."""
+    try:
+        ensure_chat_session(session_id, user_email)
+        save_chat_message(session_id, "user", user_msg)
+        save_chat_message(session_id, "assistant", assistant_msg)
+    except Exception:
+        logger.error("failed to persist chat turn | session=%s", session_id, exc_info=True)
 
 
 # ── Refund requests (Pipeline 4) ──────────────────────────────────────────────
@@ -170,7 +176,7 @@ def create_refund_request(
     }
     result = get_db().table("refund_requests").insert(row).execute()
     logger.info("refund request saved | user=%s decision=%s by=%s", user_email, decision, decided_by)
-    return result.data[0] if result.data else row
+    return first_row(result, row)
 
 
 # ── Customers (self-service profile) ──────────────────────────────────────────
@@ -184,7 +190,7 @@ def get_customer_full(email: str) -> dict | None:
     result = (
         get_db().table("customers").select("*").eq("email", email).limit(1).execute()
     )
-    return result.data[0] if result.data else None
+    return first_row(result)
 
 
 def update_customer_phone(email: str, phone: str) -> dict:
@@ -195,7 +201,7 @@ def update_customer_phone(email: str, phone: str) -> dict:
             .eq("email", email).execute()
         )
         logger.info("customer phone updated: %s", email)
-        return result.data[0] if result.data else {}
+        return first_row(result, {})
     except Exception:
         logger.error("failed to update customer phone: %s", email, exc_info=True)
         raise
@@ -224,7 +230,7 @@ def update_customer_default_address(email: str, fields: dict) -> dict:
             .eq("email", email).execute()
         )
         logger.info("customer default address updated: %s", email)
-        return result.data[0] if result.data else {}
+        return first_row(result, {})
     except Exception:
         logger.error("failed to update customer address: %s", email, exc_info=True)
         raise
@@ -242,7 +248,7 @@ def cancel_order(order_id: str) -> dict:
             .execute()
         )
         logger.info("order cancelled: %s", order_id)
-        return result.data[0] if result.data else {}
+        return first_row(result, {})
     except Exception:
         logger.error("failed to cancel order: %s", order_id, exc_info=True)
         raise

@@ -14,7 +14,6 @@ class Chunk:
     chunk_id: str
     doc_filename: str
     doc_type: str
-    content_hash: str
     section: str
     chunk_index: int
     text: str
@@ -25,7 +24,6 @@ def _make_chunk(doc: RawDocument, idx: int, section: str, text: str) -> Chunk:
         chunk_id=f"{doc.filename}_{idx}",
         doc_filename=doc.filename,
         doc_type=doc.doc_type,
-        content_hash=doc.content_hash,
         section=section,
         chunk_index=idx,
         text=text.strip(),

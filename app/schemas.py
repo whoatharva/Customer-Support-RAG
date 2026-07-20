@@ -88,7 +88,6 @@ class UpdateProfileRequest(BaseModel):
 class ProfileResponse(BaseModel):
     phone: Optional[str] = None
     address: Optional[dict] = None
-    orders: list[dict] = []
 
 
 # ── Auth (extended) ───────────────────────────────────────────────────────────
@@ -112,7 +111,6 @@ class RefundDecisionResponse(BaseModel):
 # ── Orders (self-service cancellation) ───────────────────────────────────────
 
 class CancelOrderRequest(BaseModel):
-    session_id: str
     order_id: str
 
 

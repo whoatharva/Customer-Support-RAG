@@ -36,8 +36,6 @@ class Settings(BaseSettings):
 
     # Vision pipeline (Groq multimodal)
     groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
-    vision_high_confidence: float = 0.75
-    vision_low_confidence: float = 0.40
     max_image_size_mb: int = 10
 
     # Refund verification (Pipeline 4)
