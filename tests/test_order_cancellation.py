@@ -5,12 +5,13 @@ no Supabase, no actual data. Every supported order state is exercised across
 both the service layer and the intent detection helpers.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+
+import pytest
 
 from app.services.order_cancellation import (
     CANCELLABLE_STATUSES,
     NON_CANCELLABLE_STATUSES,
-    CancellationResult,
     cancel_order,
     detect_cancel_intent,
     find_order_to_cancel,
@@ -106,68 +107,24 @@ def test_find_order_no_match(monkeypatch):
     assert result is None
 
 
-def test_find_order_no_intent_returns_none(monkeypatch):
+def test_find_order_no_intent_returns_none():
     result = find_order_to_cancel({"order_id": None, "product_name": None}, "user@test.com")
     assert result is None
 
 
-# ── cancel_order — cancellable statuses ──────────────────────────────────────
+# ── cancel_order — cancellable / non-cancellable statuses ────────────────────
 
-def _patch_lookup_and_db(monkeypatch, order: dict):
-    monkeypatch.setattr(
-        "app.services.order_cancellation.order_lookup.get_order_by_id",
-        lambda oid, email: order if oid == order["order_id"] else None,
-    )
-    monkeypatch.setattr(
-        "app.services.order_cancellation.database.cancel_order",
-        MagicMock(),
-    )
+# Keyword expected in the rejection message for each non-cancellable status.
+_REJECTION_KEYWORDS = {
+    "In Transit": "courier",
+    "Out for Delivery": "delivery",
+    "Delivered": "delivered",
+    "Cancelled": "already cancelled",
+}
 
 
-def test_cancel_pending_order(monkeypatch):
-    order = _make_order("ORD-001", "Pending")
-    _patch_lookup_and_db(monkeypatch, order)
-    result = cancel_order("ORD-001", "user@test.com")
-    assert result.success is True
-    assert result.previous_status == "Pending"
-    assert "cancelled" in result.message.lower()
-
-
-def test_cancel_processing_order(monkeypatch):
-    order = _make_order("ORD-002", "Processing")
-    _patch_lookup_and_db(monkeypatch, order)
-    result = cancel_order("ORD-002", "user@test.com")
-    assert result.success is True
-    assert result.previous_status == "Processing"
-
-
-def test_cancel_confirmed_order(monkeypatch):
-    order = _make_order("ORD-003", "Confirmed")
-    _patch_lookup_and_db(monkeypatch, order)
-    result = cancel_order("ORD-003", "user@test.com")
-    assert result.success is True
-    assert result.previous_status == "Confirmed"
-
-
-def test_cancel_packed_order(monkeypatch):
-    order = _make_order("ORD-004", "Packed")
-    _patch_lookup_and_db(monkeypatch, order)
-    result = cancel_order("ORD-004", "user@test.com")
-    assert result.success is True
-    assert result.previous_status == "Packed"
-
-
-def test_cancel_ready_to_ship_order(monkeypatch):
-    order = _make_order("ORD-005", "Ready to Ship")
-    _patch_lookup_and_db(monkeypatch, order)
-    result = cancel_order("ORD-005", "user@test.com")
-    assert result.success is True
-    assert result.previous_status == "Ready to Ship"
-
-
-# ── cancel_order — non-cancellable statuses ───────────────────────────────────
-
-def _patch_lookup_no_db(monkeypatch, order: dict):
+def _patch_lookup(monkeypatch, order: dict) -> MagicMock:
+    """Patch order lookup to return `order` and return a spy on the DB write."""
     db_spy = MagicMock()
     monkeypatch.setattr(
         "app.services.order_cancellation.order_lookup.get_order_by_id",
@@ -177,39 +134,24 @@ def _patch_lookup_no_db(monkeypatch, order: dict):
     return db_spy
 
 
-def test_cancel_in_transit_rejected(monkeypatch):
-    order = _make_order("ORD-006", "In Transit")
-    db_spy = _patch_lookup_no_db(monkeypatch, order)
+@pytest.mark.parametrize("status", sorted(CANCELLABLE_STATUSES))
+def test_cancel_cancellable_status(monkeypatch, status):
+    order = _make_order("ORD-001", status)
+    db_spy = _patch_lookup(monkeypatch, order)
+    result = cancel_order("ORD-001", "user@test.com")
+    assert result.success is True
+    assert result.previous_status == status
+    assert "cancelled" in result.message.lower()
+    db_spy.assert_called_once_with("ORD-001")
+
+
+@pytest.mark.parametrize("status", sorted(NON_CANCELLABLE_STATUSES))
+def test_cancel_non_cancellable_status_rejected(monkeypatch, status):
+    order = _make_order("ORD-006", status)
+    db_spy = _patch_lookup(monkeypatch, order)
     result = cancel_order("ORD-006", "user@test.com")
     assert result.success is False
-    assert "courier" in result.message.lower()
-    db_spy.assert_not_called()
-
-
-def test_cancel_out_for_delivery_rejected(monkeypatch):
-    order = _make_order("ORD-007", "Out for Delivery")
-    db_spy = _patch_lookup_no_db(monkeypatch, order)
-    result = cancel_order("ORD-007", "user@test.com")
-    assert result.success is False
-    assert "delivery" in result.message.lower()
-    db_spy.assert_not_called()
-
-
-def test_cancel_delivered_rejected(monkeypatch):
-    order = _make_order("ORD-008", "Delivered")
-    db_spy = _patch_lookup_no_db(monkeypatch, order)
-    result = cancel_order("ORD-008", "user@test.com")
-    assert result.success is False
-    assert "delivered" in result.message.lower()
-    db_spy.assert_not_called()
-
-
-def test_cancel_already_cancelled_rejected(monkeypatch):
-    order = _make_order("ORD-009", "Cancelled")
-    db_spy = _patch_lookup_no_db(monkeypatch, order)
-    result = cancel_order("ORD-009", "user@test.com")
-    assert result.success is False
-    assert "already cancelled" in result.message.lower()
+    assert _REJECTION_KEYWORDS[status] in result.message.lower()
     db_spy.assert_not_called()
 
 
@@ -223,18 +165,6 @@ def test_cancel_order_not_found(monkeypatch):
     result = cancel_order("ORD-GHOST", "user@test.com")
     assert result.success is False
     assert "couldn't find" in result.message.lower()
-
-
-def test_cancel_db_write_called_once(monkeypatch):
-    order = _make_order("ORD-010", "Pending")
-    db_spy = MagicMock()
-    monkeypatch.setattr(
-        "app.services.order_cancellation.order_lookup.get_order_by_id",
-        lambda oid, email: order,
-    )
-    monkeypatch.setattr("app.services.order_cancellation.database.cancel_order", db_spy)
-    cancel_order("ORD-010", "user@test.com")
-    db_spy.assert_called_once_with("ORD-010")
 
 
 # ── Status set completeness ───────────────────────────────────────────────────

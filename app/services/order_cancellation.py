@@ -19,6 +19,7 @@ import re
 from dataclasses import dataclass
 
 from app.helpers import database, order_lookup
+from app.helpers.text import contains_any
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
@@ -66,8 +67,7 @@ _ORDER_ID_RE = re.compile(
 
 def matches_cancel_keywords(query: str) -> bool:
     """Cheap substring gate — True if the query plausibly requests a cancellation."""
-    q = query.lower()
-    return any(kw in q for kw in _CANCEL_KEYWORDS)
+    return contains_any(query, _CANCEL_KEYWORDS)
 
 
 def detect_cancel_intent(query: str) -> dict:

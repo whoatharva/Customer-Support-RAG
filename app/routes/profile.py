@@ -29,5 +29,4 @@ def update_contact(body: UpdateProfileRequest, user_email: str = Depends(verify_
     return ProfileResponse(
         phone=customer.get("phone"),
         address=addresses[0] if addresses else None,
-        orders=[],
     )

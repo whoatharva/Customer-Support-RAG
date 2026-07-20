@@ -32,18 +32,31 @@ def _result(**overrides) -> VerificationResult:
     return VerificationResult(**base)
 
 
-def _run(monkeypatch, result: VerificationResult, hil_decision: str = "approved") -> dict:
+def _run(
+    monkeypatch,
+    result: VerificationResult,
+    hil_decision: str = "approved",
+    *,
+    hil_spy: MagicMock | None = None,
+    create_spy: MagicMock | None = None,
+    save_spy: MagicMock | None = None,
+    claim: str = "screen cracked",
+) -> dict:
     monkeypatch.setattr(analyzer.verifier, "verify_image", lambda *a, **k: result)
-    monkeypatch.setattr(analyzer.database, "create_refund_request", lambda **k: {"id": "r1"})
+    monkeypatch.setattr(analyzer.database, "create_refund_request",
+                        create_spy or (lambda **k: {"id": "r1"}))
     monkeypatch.setattr(analyzer.database, "ensure_chat_session", lambda *a, **k: None)
-    monkeypatch.setattr(analyzer.database, "save_chat_message", lambda *a, **k: None)
+    monkeypatch.setattr(analyzer.database, "save_chat_message", save_spy or (lambda *a, **k: None))
 
-    async def _fake_hil(summary):
-        return hil_decision
-    monkeypatch.setattr(analyzer.hil, "request_human_decision", _fake_hil)
+    if hil_spy is not None:
+        monkeypatch.setattr(analyzer.hil, "request_human_decision", hil_spy)
+    else:
+        async def _fake_hil(summary):
+            return hil_decision
+        monkeypatch.setattr(analyzer.hil, "request_human_decision", _fake_hil)
 
     return asyncio.run(
-        analyzer.process_refund_claim(b"imgbytes", "image/jpeg", "screen cracked", "u@x.com", "sess1")
+        analyzer.process_refund_claim(b"imgbytes", "image/jpeg", claim, "u@x.com", "sess1")
     )
 
 
@@ -88,16 +101,12 @@ def test_borderline_goes_to_hil_reject(monkeypatch):
 def test_contradiction_auto_rejected(monkeypatch):
     # The laptop-in-box case: photo shows the item present, claim says it's missing.
     hil_spy = MagicMock()
-    monkeypatch.setattr(analyzer.verifier, "verify_image",
-                        lambda *a, **k: _result(contradicts_claim=True, confidence=0.95,
-                                                match_reason="laptop is clearly present in the box"))
-    monkeypatch.setattr(analyzer.database, "create_refund_request", lambda **k: {"id": "r1"})
-    monkeypatch.setattr(analyzer.database, "ensure_chat_session", lambda *a, **k: None)
-    monkeypatch.setattr(analyzer.database, "save_chat_message", lambda *a, **k: None)
-    monkeypatch.setattr(analyzer.hil, "request_human_decision", hil_spy)
-
-    out = asyncio.run(
-        analyzer.process_refund_claim(b"img", "image/jpeg", "laptop missing", "u@x.com", "s1")
+    out = _run(
+        monkeypatch,
+        _result(contradicts_claim=True, confidence=0.95,
+                match_reason="laptop is clearly present in the box"),
+        hil_spy=hil_spy,
+        claim="laptop missing",
     )
     assert out["decision"] == "rejected"
     assert hil_spy.call_count == 0  # auto-rejected, never reaches HIL
@@ -124,13 +133,7 @@ def test_parse_failure_not_auto_approved(monkeypatch):
 def test_decision_is_persisted(monkeypatch):
     spy = MagicMock(return_value={"id": "r1"})
     save_spy = MagicMock()
-    monkeypatch.setattr(analyzer.verifier, "verify_image", lambda *a, **k: _result())
-    monkeypatch.setattr(analyzer.database, "create_refund_request", spy)
-    monkeypatch.setattr(analyzer.database, "ensure_chat_session", lambda *a, **k: None)
-    monkeypatch.setattr(analyzer.database, "save_chat_message", save_spy)
-    asyncio.run(
-        analyzer.process_refund_claim(b"img", "image/jpeg", "cracked", "u@x.com", "s1")
-    )
+    _run(monkeypatch, _result(), create_spy=spy, save_spy=save_spy, claim="cracked")
     assert spy.call_count == 1
     assert spy.call_args.kwargs["decision"] == "approved"
     assert spy.call_args.kwargs["decided_by"] == "auto"

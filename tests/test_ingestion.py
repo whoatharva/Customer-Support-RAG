@@ -26,7 +26,7 @@ def test_load_documents(tmp_path):
     assert {d.filename for d in docs} == {"a.md", "b.md"}
 
 
-def test_chunk_document(sample_raw_doc):
+def test_chunk_document():
     # Force multiple chunks from the sample doc.
     body = "\n\n".join(f"## Section {i}\n\n" + ("word " * 120) for i in range(4))
     doc = RawDocument(
@@ -46,7 +46,7 @@ def test_chunk_document(sample_raw_doc):
     # chunk_index is contiguous from 0.
     assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
     # Required metadata carried through from the source doc.
-    assert all(c.doc_filename == "big.md" and c.content_hash == "abc123" for c in chunks)
+    assert all(c.doc_filename == "big.md" for c in chunks)
 
 
 def _fake_doc(filename="shipping.md", content_hash="hash1") -> RawDocument:
@@ -90,7 +90,7 @@ def test_run_ingestion_processes_changed(monkeypatch):
 
     fake_chunk = Chunk(
         chunk_id="shipping.md_0", doc_filename="shipping.md", doc_type="md",
-        content_hash="hash1", section="General", chunk_index=0, text="chunk text",
+        section="General", chunk_index=0, text="chunk text",
     )
     monkeypatch.setattr(ingester, "chunk_document", lambda doc: [fake_chunk])
     monkeypatch.setattr(ingester, "embed_chunks", lambda chunks: [(fake_chunk, [0.1] * 8)])

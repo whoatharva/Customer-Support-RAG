@@ -8,15 +8,16 @@ Flow:
   5. Update Langfuse trace with final output + metadata.
 """
 
-import json
-
 from app.schemas import ChatRequest, ChatResponse
 from app.pipelines.query.processor import process_query
 from app.pipelines.retrieval.retriever import generate_response
 from app.services import profile_service
 from app.services import order_cancellation
 from app.helpers import database
+from app.helpers import order_lookup
+from app.helpers.text import contains_any
 from app.llm import lightweight
+from app.llm.parsing import parse_json_lenient
 from app.llm.prompts import SPLIT_PROMPT
 from app.helpers.langfuse import get_langfuse
 from app.helpers.logger import get_logger
@@ -26,12 +27,7 @@ logger = get_logger(__name__)
 
 def _persist_turn(session_id: str, user_email: str, query: str, answer: str):
     """Store a user/assistant exchange in Supabase (best effort)."""
-    try:
-        database.ensure_chat_session(session_id, user_email)
-        database.save_chat_message(session_id, "user", query)
-        database.save_chat_message(session_id, "assistant", answer)
-    except Exception:
-        logger.error("failed to persist chat to Supabase | session=%s", session_id, exc_info=True)
+    database.persist_chat_turn(session_id, user_email, query, answer)
 
 
 def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
@@ -53,43 +49,9 @@ def handle_chat(request: ChatRequest, user_email: str = "") -> ChatResponse:
 
     # ── Self-service profile branch (skips RAG) ──────────────────────────────
     if user_email and profile_service.matches_keywords(request.query):
-        det = profile_service.detect(request.query)
-        if det["action"] == "view":
-            answer = profile_service.render_profile(user_email)
-            _persist_turn(request.session_id, user_email, request.query, answer)
-            return ChatResponse(answer=answer, citations=[], confidence=1.0)
-        if det["action"] == "update" and det["field"] in ("phone", "address"):
-            ok, error = profile_service.validate(det["field"], det["values"])
-            if ok:
-                confirm = _confirm_prompt(det)
-                # Compound query (e.g. "status of my order AND update my phone"):
-                # answer the question part via RAG first, then append the confirm
-                # prompt so the user gets both in one turn without re-asking.
-                if _has_secondary_question(request.query):
-                    rag = _run_rag(request, user_email)
-                    answer = (
-                        f"{rag['answer']}\n\n---\n\nAlso, about your profile update: {confirm}"
-                    )
-                    _persist_turn(request.session_id, user_email, request.query, answer)
-                    return ChatResponse(
-                        answer=answer,
-                        citations=rag["citations"],
-                        confidence=rag["confidence"],
-                        should_escalate=rag["should_escalate"],
-                        total_tokens=rag.get("total_tokens"),
-                        action="profile_update",
-                        action_payload={"field": det["field"], "values": det["values"]},
-                    )
-                answer = confirm
-                _persist_turn(request.session_id, user_email, request.query, answer)
-                return ChatResponse(
-                    answer=answer, citations=[], confidence=1.0,
-                    action="profile_update",
-                    action_payload={"field": det["field"], "values": det["values"]},
-                )
-            answer = error
-            _persist_turn(request.session_id, user_email, request.query, answer)
-            return ChatResponse(answer=answer, citations=[], confidence=1.0)
+        handled = _handle_profile(request, user_email)
+        if handled is not None:
+            return handled
         # action == "none" → fall through to RAG
 
     result = _run_rag(request, user_email)
@@ -125,7 +87,7 @@ def _handle_cancel(request: ChatRequest, user_email: str) -> ChatResponse:
 
     order_id = order.get("order_id", "")
     current_status = order.get("status", "")
-    items = ", ".join(i.get("name", "") for i in order.get("items", []))
+    items = order_lookup.format_order_items(order)
 
     if current_status in order_cancellation.CANCELLABLE_STATUSES:
         answer = (
@@ -147,6 +109,48 @@ def _handle_cancel(request: ChatRequest, user_email: str) -> ChatResponse:
     result = order_cancellation.cancel_order(order_id, user_email)
     _persist_turn(request.session_id, user_email, request.query, result.message)
     return ChatResponse(answer=result.message, citations=[], confidence=1.0)
+
+
+def _handle_profile(request: ChatRequest, user_email: str) -> ChatResponse | None:
+    """Handle a self-service profile view/update. Returns None to fall through to RAG."""
+    det = profile_service.detect(request.query)
+    if det["action"] == "view":
+        answer = profile_service.render_profile(user_email)
+        _persist_turn(request.session_id, user_email, request.query, answer)
+        return ChatResponse(answer=answer, citations=[], confidence=1.0)
+
+    if det["action"] == "update" and det["field"] in ("phone", "address"):
+        ok, error = profile_service.validate(det["field"], det["values"])
+        if not ok:
+            _persist_turn(request.session_id, user_email, request.query, error)
+            return ChatResponse(answer=error, citations=[], confidence=1.0)
+
+        confirm = profile_service.confirm_prompt(det)
+        payload = {"field": det["field"], "values": det["values"]}
+        # Compound query (e.g. "status of my order AND update my phone"):
+        # answer the question part via RAG first, then append the confirm
+        # prompt so the user gets both in one turn without re-asking.
+        if _has_secondary_question(request.query):
+            rag = _run_rag(request, user_email)
+            answer = f"{rag['answer']}\n\n---\n\nAlso, about your profile update: {confirm}"
+            _persist_turn(request.session_id, user_email, request.query, answer)
+            return ChatResponse(
+                answer=answer,
+                citations=rag["citations"],
+                confidence=rag["confidence"],
+                should_escalate=rag["should_escalate"],
+                total_tokens=rag.get("total_tokens"),
+                action="profile_update",
+                action_payload=payload,
+            )
+        _persist_turn(request.session_id, user_email, request.query, confirm)
+        return ChatResponse(
+            answer=confirm, citations=[], confidence=1.0,
+            action="profile_update", action_payload=payload,
+        )
+
+    # action == "none" → caller falls through to RAG
+    return None
 
 
 def _classify_sub(sub: str, user_email: str) -> dict:
@@ -198,7 +202,7 @@ def _handle_multi(request: ChatRequest, user_email: str, subs: list[str]) -> Cha
     action = None
     action_payload = None
     if pending_update is not None:
-        confirm = _confirm_prompt(pending_update)
+        confirm = profile_service.confirm_prompt(pending_update)
         prefix = f"{answer}\n\n---\n\n" if answer else ""
         answer = f"{prefix}Also, about your profile update: {confirm}"
         if skipped_update:
@@ -284,8 +288,7 @@ _SECONDARY_QUESTION_TERMS = (
 def _has_secondary_question(query: str) -> bool:
     """True if a profile-update query ALSO carries an order/support question, so the
     turn should answer that via RAG before showing the update confirm."""
-    q = query.lower()
-    return any(term in q for term in _SECONDARY_QUESTION_TERMS)
+    return contains_any(query, _SECONDARY_QUESTION_TERMS)
 
 
 # Cheap connector signals that a message may bundle more than one request. Used only
@@ -301,8 +304,7 @@ def _looks_multi_intent(query: str) -> bool:
         return False
     if q.count("?") >= 2:
         return True
-    has_connector = any(c in q for c in _MULTI_INTENT_CONNECTORS)
-    if not has_connector:
+    if not contains_any(q, _MULTI_INTENT_CONNECTORS):
         return False
     # A connector plus either a profile ask or an order/support term is a strong
     # signal of two distinct intents (question + question, or question + update).
@@ -315,25 +317,13 @@ def _split_intents(query: str) -> list[str]:
     Degrades to `[query]` (single-shot) on any parse/LLM failure or a 1-item result.
     """
     try:
-        raw = lightweight.call(SPLIT_PROMPT.format(query=query), max_tokens=300).strip()
-        # Strip a ```json ... ``` fence if the model added one.
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            raw = raw[raw.find("["):]
-        parsed = json.loads(raw)
-        subs = [s.strip() for s in parsed if isinstance(s, str) and s.strip()]
+        raw = lightweight.call(SPLIT_PROMPT.format(query=query), max_tokens=300)
+        parsed = parse_json_lenient(raw, slice_from="[")
+        subs = [s.strip() for s in (parsed or []) if isinstance(s, str) and s.strip()]
     except Exception:
-        logger.warning("intent split failed, treating as single query | raw handling", exc_info=True)
+        logger.warning("intent split failed, treating as single query", exc_info=True)
         return [query]
     if len(subs) <= 1:
         return [query]
     logger.info("split into %d sub-queries: %s", len(subs), subs)
     return subs
-
-
-def _confirm_prompt(det: dict) -> str:
-    """Human-readable confirmation text for a pending profile update."""
-    if det["field"] == "phone":
-        return f"I'll update your phone number to **{det['values'].get('phone')}**. Confirm?"
-    changed = ", ".join(f"{k}: {v}" for k, v in det["values"].items())
-    return f"I'll update your address ({changed}). Confirm?"

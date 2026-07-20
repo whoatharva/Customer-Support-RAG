@@ -37,14 +37,13 @@ def upsert_points(points: list[PointStruct]):
         raise
 
 
-def search(query_vector: list[float], top_k: int = 5, filters: dict | None = None) -> list[ScoredPoint]:
-    logger.debug("search: top_k=%d filters=%s", top_k, filters)
+def search(query_vector: list[float], top_k: int = 5) -> list[ScoredPoint]:
+    logger.debug("search: top_k=%d", top_k)
     try:
         return get_qdrant().query_points(
             collection_name=settings.qdrant_collection_name,
             query=query_vector,
             limit=top_k,
-            query_filter=filters,
             with_payload=True,
         ).points
     except Exception:
