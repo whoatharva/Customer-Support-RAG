@@ -1,0 +1,31 @@
+
+Report Summary
+
+┌─────────┬──────┬─────────────────┐
+│ Target  │ Type │ Vulnerabilities │
+├─────────┼──────┼─────────────────┤
+│ uv.lock │  uv  │        3        │
+└─────────┴──────┴─────────────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+
+uv.lock (uv)
+============
+Total: 3 (UNKNOWN: 0, LOW: 1, MEDIUM: 1, HIGH: 1, CRITICAL: 0)
+
+┌───────────┬────────────────┬──────────┬──────────┬───────────────────┬───────────────┬──────────────────────────────────────────────────────────────┐
+│  Library  │ Vulnerability  │ Severity │  Status  │ Installed Version │ Fixed Version │                            Title                             │
+├───────────┼────────────────┼──────────┼──────────┼───────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ diskcache │ CVE-2025-69872 │ MEDIUM   │ affected │ 5.6.3             │               │ python-diskcache: python-diskcache: Arbitrary code execution │
+│           │                │          │          │                   │               │ via insecure pickle deserialization                          │
+│           │                │          │          │                   │               │ https://avd.aquasec.com/nvd/cve-2025-69872                   │
+├───────────┼────────────────┼──────────┤          ├───────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ ecdsa     │ CVE-2024-23342 │ HIGH     │          │ 0.19.2            │               │ python-ecdsa: vulnerable to the Minerva attack               │
+│           │                │          │          │                   │               │ https://avd.aquasec.com/nvd/cve-2024-23342                   │
+├───────────┼────────────────┼──────────┤          ├───────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ ragas     │ CVE-2026-6587  │ LOW      │          │ 0.4.3             │               │ vibrantlabsai RAGAS: vibrantlabsai RAGAS: Server-Side        │
+│           │                │          │          │                   │               │ Request Forgery via retrieved_contexts argument manipulation │
+│           │                │          │          │                   │               │ https://avd.aquasec.com/nvd/cve-2026-6587                    │
+└───────────┴────────────────┴──────────┴──────────┴───────────────────┴───────────────┴──────────────────────────────────────────────────────────────┘
