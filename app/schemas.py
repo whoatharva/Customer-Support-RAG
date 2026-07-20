@@ -12,8 +12,13 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
     expires_in: int = settings.jwt_expiry_minutes * 60
 
@@ -52,7 +57,6 @@ class IngestionStatusResponse(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str
     query: str
-    invoice_ids: Optional[list[str]] = None
 
 
 class Citation(BaseModel):
@@ -69,6 +73,21 @@ class ChatResponse(BaseModel):
     confidence: float
     should_escalate: bool = False
     total_tokens: int | None = None
+    # Pending client-side action (e.g. a profile update awaiting Confirm/Cancel).
+    action: str | None = None
+    action_payload: dict | None = None
+
+
+# ── Profile (self-service) ────────────────────────────────────────────────────
+
+class UpdateProfileRequest(BaseModel):
+    field: str            # "phone" | "address"
+    values: dict          # {"phone": ...} or {"line1": ..., "city": ..., ...}
+
+
+class ProfileResponse(BaseModel):
+    phone: Optional[str] = None
+    address: Optional[dict] = None
 
 
 # ── Auth (extended) ───────────────────────────────────────────────────────────
@@ -79,8 +98,25 @@ class RegisterRequest(BaseModel):
     password: str
 
 
-# ── Chat history ──────────────────────────────────────────────────────────────
+# ── Vision (Pipeline 4) ───────────────────────────────────────────────────────
 
-class ChatHistoryResponse(BaseModel):
-    session_id: str
-    messages: list[dict]
+class RefundDecisionResponse(BaseModel):
+    decision: str
+    reason: str
+    confidence: float
+    issue_type: str
+    customer_message: str
+
+
+# ── Orders (self-service cancellation) ───────────────────────────────────────
+
+class CancelOrderRequest(BaseModel):
+    order_id: str
+
+
+class CancelOrderResponse(BaseModel):
+    success: bool
+    order_id: str
+    previous_status: str
+    message: str
+

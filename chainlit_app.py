@@ -2,15 +2,14 @@ import os
 import shutil
 import tempfile
 import uuid
-from datetime import datetime, timedelta, timezone
 import httpx
-from jose import jwt
 import chainlit as cl
 import chainlit.data as cl_data
 from dotenv import load_dotenv
 from app.llm.prompts import SUPPORT_CONTACT
 from app.chainlit_data_layer import SupabaseDataLayer
 from app.config import settings
+from app.helpers.tokens import encode_token
 
 load_dotenv()
 
@@ -18,12 +17,11 @@ cl_data._data_layer = SupabaseDataLayer()
 
 API_BASE = "http://localhost:8000/api/v1"
 SUPPORTED_EXTENSIONS = {".md", ".pdf", ".docx"}
-INVOICE_EXTENSIONS = {".md"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def _mint_jwt(subject: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expiry_minutes)
-    return jwt.encode({"sub": subject, "exp": expire}, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    return encode_token(subject, settings.jwt_expiry_minutes, "access")
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -46,8 +44,15 @@ async def auth_callback(username: str, password: str) -> cl.User | None:
                 json={"email": username, "password": password},
             )
             if res.status_code == 200:
-                token = res.json()["access_token"]
-                return cl.User(identifier=username, metadata={"token": token, "role": "user"})
+                body = res.json()
+                return cl.User(
+                    identifier=username,
+                    metadata={
+                        "token": body["access_token"],
+                        "refresh_token": body["refresh_token"],
+                        "role": "user",
+                    },
+                )
             print(f"[auth] login failed: status={res.status_code} body={res.text}")
         except Exception as e:
             print(f"[auth] exception calling API: {e}")
@@ -58,6 +63,61 @@ def get_token() -> str:
     return cl.user_session.get("user").metadata.get("token", "")
 
 
+async def _refresh_token() -> bool:
+    """Obtain a fresh access token. Returns True on success.
+
+    Admin tokens are minted locally; user tokens are refreshed via the API using
+    the stored refresh token. The new access token is written back to the session.
+    """
+    user = cl.user_session.get("user")
+    if user is None:
+        return False
+    meta = user.metadata
+
+    if meta.get("role") == "admin":
+        meta["token"] = _mint_jwt(settings.admin_username)
+        cl.user_session.set("user", user)
+        return True
+
+    refresh = meta.get("refresh_token")
+    if not refresh:
+        return False
+    async with httpx.AsyncClient() as client:
+        try:
+            res = await client.post(
+                f"{API_BASE}/auth/refresh",
+                json={"refresh_token": refresh},
+            )
+        except Exception as e:
+            print(f"[auth] refresh exception: {e}")
+            return False
+    if res.status_code != 200:
+        print(f"[auth] refresh failed: status={res.status_code}")
+        return False
+    body = res.json()
+    meta["token"] = body["access_token"]
+    meta["refresh_token"] = body["refresh_token"]
+    cl.user_session.set("user", user)
+    return True
+
+
+async def authed_request(method: str, path: str, **kwargs) -> httpx.Response:
+    """Perform an authenticated API request, transparently refreshing the token
+    and retrying once on a 401. Callers should raise_for_status() as usual.
+    """
+    timeout = kwargs.pop("timeout", 60)
+    base_headers = kwargs.pop("headers", {})
+    for attempt in range(2):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            headers = {**base_headers, "Authorization": f"Bearer {get_token()}"}
+            res = await client.request(method, f"{API_BASE}{path}", headers=headers, **kwargs)
+        if res.status_code != 401 or attempt == 1:
+            return res
+        if not await _refresh_token():
+            return res
+    return res
+
+
 def is_admin() -> bool:
     user = cl.user_session.get("user")
     return user is not None and user.metadata.get("role") == "admin"
@@ -66,14 +126,11 @@ def is_admin() -> bool:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def call_ingest(path: str) -> dict:
-    async with httpx.AsyncClient(timeout=120) as client:
-        res = await client.post(
-            f"{API_BASE}/admin/ingest",
-            json={"path": path},
-            headers={"Authorization": f"Bearer {get_token()}"},
-        )
-        res.raise_for_status()
-        return res.json()
+    res = await authed_request(
+        "POST", "/admin/ingest", json={"path": path}, timeout=120
+    )
+    res.raise_for_status()
+    return res.json()
 
 
 def format_ingest_result(data: dict) -> str:
@@ -93,20 +150,38 @@ def format_ingest_result(data: dict) -> str:
 
 async def handle_chat_query(text: str):
     session_id = cl.user_session.get("session_id")
-    invoice_ids = cl.user_session.get("invoice_ids") or []
 
-    msg = cl.Message(content="")
+    msg = cl.Message(content="🔄 Working on your request…")
     await msg.send()
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            res = await client.post(
-                f"{API_BASE}/chat/query",
-                json={"session_id": session_id, "query": text, "invoice_ids": invoice_ids or None},
-                headers={"Authorization": f"Bearer {get_token()}"},
-            )
-            res.raise_for_status()
-            data = res.json()
+        res = await authed_request(
+            "POST", "/chat/query", json={"session_id": session_id, "query": text}
+        )
+        res.raise_for_status()
+        data = res.json()
+
+        # Profile update awaiting confirmation — render Confirm/Cancel buttons.
+        if data.get("action") == "profile_update":
+            payload = data.get("action_payload") or {}
+            msg.content = data["answer"]
+            msg.actions = [
+                cl.Action(name="confirm_profile", payload=payload, label="✅ Confirm"),
+                cl.Action(name="cancel_profile", payload={}, label="✖ Cancel"),
+            ]
+            await msg.update()
+            return
+
+        # Order cancellation awaiting confirmation — render Confirm/Cancel buttons.
+        if data.get("action") == "order_cancel":
+            payload = data.get("action_payload") or {}
+            msg.content = data["answer"]
+            msg.actions = [
+                cl.Action(name="confirm_order_cancel", payload=payload, label="✅ Yes, cancel it"),
+                cl.Action(name="dismiss_order_cancel", payload={}, label="✖ Keep my order"),
+            ]
+            await msg.update()
+            return
 
         answer = data["answer"]
         should_escalate = data["should_escalate"]
@@ -120,10 +195,10 @@ async def handle_chat_query(text: str):
             # Always show invoice citations; hide FAQ chunks below relevance threshold
             if not is_invoice and c.get("score", 0) < 0.45:
                 continue
-            key = f"{c['source_document']} / {c['section']}"
+            key = c["source_document"]
             if key not in seen:
                 seen.add(key)
-                source_lines.append(f"- `{c['source_document']}` — {c['section']}")
+                source_lines.append(f"- `{c['source_document']}`")
         if source_lines:
             lines.append("**Sources:**")
             lines.extend(source_lines)
@@ -132,6 +207,15 @@ async def handle_chat_query(text: str):
 
         msg.content = "\n".join(lines)
         await msg.update()
+
+        # Auto-name the thread after the first message
+        if not cl.user_session.get("thread_named"):
+            thread_name = text[:60].strip()
+            user_email = cl.context.session.user.identifier if cl.context.session.user else None
+            await cl_data.get_data_layer().update_thread(
+                thread_id=cl.context.session.thread_id, name=thread_name, user_id=user_email
+            )
+            cl.user_session.set("thread_named", True)
 
     except httpx.HTTPStatusError as e:
         msg.content = f"API error {e.response.status_code}: {e.response.text}"
@@ -145,8 +229,14 @@ async def handle_chat_query(text: str):
 
 @cl.on_chat_start
 async def start():
-    cl.user_session.set("session_id", str(uuid.uuid4()))
-    cl.user_session.set("invoice_ids", [])
+    session_id = str(uuid.uuid4())
+    cl.user_session.set("session_id", session_id)
+    cl.user_session.set("thread_named", False)
+    # Persist session_id so on_chat_resume can restore it
+    user_email = cl.context.session.user.identifier if cl.context.session.user else None
+    await cl_data.get_data_layer().update_thread(
+        thread_id=cl.context.session.thread_id, user_id=user_email, metadata={"session_id": session_id}
+    )
 
     if is_admin():
         cl.user_session.set("browse_path", os.path.expanduser("~"))
@@ -166,10 +256,18 @@ async def start():
             content=(
                 "**Customer Support**\n\n"
                 "Hi! How can I help you today?\n\n"
-                "You can upload your **invoice** (`.md` file) to get help with a specific order, "
-                "or just type your question directly."
+                "Type your question directly, or upload a photo of your product/package "
+                "if you need help with a delivery or product issue."
             )
         ).send()
+
+
+@cl.on_chat_resume
+async def resume(thread: dict):
+    metadata = thread.get("metadata") or {}
+    session_id = metadata.get("session_id") or str(uuid.uuid4())
+    cl.user_session.set("session_id", session_id)
+    cl.user_session.set("thread_named", True)  # already named, don't overwrite
 
 
 # ── File upload (drag & drop) ─────────────────────────────────────────────────
@@ -178,7 +276,7 @@ async def handle_file_upload(message: cl.Message):
     if is_admin():
         await _handle_admin_upload(message)
     else:
-        await _handle_user_invoice_upload(message)
+        await _handle_user_image_upload(message)
 
 
 async def _handle_admin_upload(message: cl.Message):
@@ -198,55 +296,67 @@ async def _handle_admin_upload(message: cl.Message):
     try:
         for f in files:
             shutil.copy(f.path, os.path.join(tmp_dir, f.name))
-        data = await call_ingest(tmp_dir)
-        msg.content = format_ingest_result(data)
-        await msg.update()
-    except httpx.HTTPStatusError as e:
-        msg.content = f"API error {e.response.status_code}: {e.response.text}"
-        await msg.update()
-    except Exception as e:
-        msg.content = f"Error: {e}"
-        await msg.update()
+        await _run_ingest(msg, tmp_dir)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-async def _handle_user_invoice_upload(message: cl.Message):
-    invoices = [e for e in message.elements if hasattr(e, "path") and
-                os.path.splitext(e.name)[1].lower() in INVOICE_EXTENSIONS]
+async def _handle_user_image_upload(message: cl.Message):
+    images = [e for e in message.elements if hasattr(e, "path") and
+              os.path.splitext(e.name)[1].lower() in IMAGE_EXTENSIONS]
 
-    if not invoices:
+    if not images:
         await cl.Message(
-            content="Please upload your invoice as a `.md` file."
+            content="I can analyze product/package photos (`.jpg`, `.png`, `.webp`). "
+                    "Just upload a clear photo and I'll check for issues."
         ).send()
         return
 
-    user_email = cl.user_session.get("user").identifier
-    _BASE = os.path.join(os.path.dirname(__file__), "data", "invoices")
-    active_ids: list[str] = list(cl.user_session.get("invoice_ids") or [])
+    session_id = cl.user_session.get("session_id")
 
-    for f in invoices:
-        invoice_id = os.path.splitext(f.name)[0]
-        invoice_path = os.path.join(_BASE, user_email, f.name)
-        if not os.path.exists(invoice_path):
-            await cl.Message(
-                content=(
-                    f"⚠️ Invoice **{invoice_id}** is not associated with your account. "
-                    "Please upload one of your own invoices."
-                )
-            ).send()
-            continue
-        if invoice_id not in active_ids:
-            active_ids.append(invoice_id)
-
-    if not active_ids:
-        return
-
-    cl.user_session.set("invoice_ids", active_ids)
-    ids_str = ", ".join(f"**{i}**" for i in active_ids)
-    await cl.Message(
-        content=f"Active invoices: {ids_str}. You can now ask me about your orders."
+    # Ask the customer what they're claiming, so we can verify the photo against it.
+    claim_reply = await cl.AskUserMessage(
+        content="What issue are you reporting with this item? "
+                "(e.g. 'the screen is cracked', 'wrong item delivered')",
+        timeout=180,
     ).send()
+    claim = (claim_reply or {}).get("output", "").strip() if claim_reply else ""
+    if not claim:
+        claim = "Customer reports an issue with the delivered item (no details provided)."
+
+    msg = cl.Message(content="Verifying your claim against the photo... "
+                             "(this may pause for a manual review)")
+    await msg.send()
+
+    f = images[0]
+    try:
+        with open(f.path, "rb") as img_file:
+            img_bytes = img_file.read()
+        res = await authed_request(
+            "POST",
+            "/chat/analyze-image",
+            data={"session_id": session_id, "claim": claim},
+            files={"file": (f.name, img_bytes, _mime_type(f.name))},
+        )
+        res.raise_for_status()
+        data = res.json()
+
+        decision = data["decision"].upper()
+        badge = "✅" if data["decision"] == "approved" else "❌"
+        msg.content = f"{badge} **Refund {decision}**\n\n{data['customer_message']}"
+        await msg.update()
+
+    except httpx.HTTPStatusError as e:
+        msg.content = f"Image analysis failed ({e.response.status_code}): {e.response.text}"
+        await msg.update()
+    except Exception as e:
+        msg.content = f"Error analyzing image: {e}"
+        await msg.update()
+
+
+def _mime_type(filename: str) -> str:
+    ext = os.path.splitext(filename)[1].lower()
+    return {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext.lstrip("."), "image/jpeg")
 
 
 # ── Folder browser (admin only) ───────────────────────────────────────────────
@@ -264,25 +374,25 @@ async def show_folder_browser(path: str):
 
     parent = os.path.dirname(path)
     if parent != path:
-        actions.append(cl.Action(name="browse_up", value=parent, label=".. (go up)"))
+        actions.append(cl.Action(name="browse_up", payload={"path": parent}, label=".. (go up)"))
 
     for entry in entries:
         if entry.is_dir():
             actions.append(cl.Action(
                 name="browse_cd",
-                value=entry.path,
+                payload={"path": entry.path},
                 label=f"📁 {entry.name}",
             ))
         elif os.path.splitext(entry.name)[1].lower() in SUPPORTED_EXTENSIONS:
             actions.append(cl.Action(
                 name="browse_file",
-                value=entry.path,
+                payload={"path": entry.path},
                 label=f"📄 {entry.name}",
             ))
 
     actions.append(cl.Action(
         name="browse_ingest",
-        value=path,
+        payload={"path": path},
         label=f"✅ Ingest this folder: {os.path.basename(path) or path}",
     ))
 
@@ -298,34 +408,94 @@ async def show_folder_browser(path: str):
 
 @cl.action_callback("browse_cd")
 async def on_browse_cd(action: cl.Action):
-    await show_folder_browser(action.value)
+    await show_folder_browser(action.payload.get("path", ""))
 
 
 @cl.action_callback("browse_up")
 async def on_browse_up(action: cl.Action):
-    await show_folder_browser(action.value)
+    await show_folder_browser(action.payload.get("path", ""))
+
+
+async def _run_ingest(msg: cl.Message, path: str):
+    """Call the ingest API and update `msg` with the result or a friendly error."""
+    try:
+        data = await call_ingest(path)
+        msg.content = format_ingest_result(data)
+    except FileNotFoundError:
+        msg.content = f"Path not found: `{path}`"
+    except httpx.HTTPStatusError as e:
+        msg.content = f"API error {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        msg.content = f"Error: {e}"
+    await msg.update()
 
 
 @cl.action_callback("browse_file")
 async def on_browse_file(action: cl.Action):
-    await cl.Message(content=f"Selected file: `{action.value}`\nTo ingest it, ingest its parent folder.").send()
+    path = action.payload.get("path", "")
+    await cl.Message(content=f"Selected file: `{path}`\nTo ingest it, ingest its parent folder.").send()
 
 
 @cl.action_callback("browse_ingest")
 async def on_browse_ingest(action: cl.Action):
-    path = action.value
+    path = action.payload.get("path", "")
     msg = cl.Message(content=f"Ingesting folder `{path}`...")
     await msg.send()
+    await _run_ingest(msg, path)
+
+
+@cl.action_callback("confirm_profile")
+async def on_confirm_profile(action: cl.Action):
+    payload = action.payload or {}
+    await action.remove()
+    msg = cl.Message(content="Applying your change...")
+    await msg.send()
     try:
-        data = await call_ingest(path)
-        msg.content = format_ingest_result(data)
-        await msg.update()
-    except httpx.HTTPStatusError as e:
-        msg.content = f"API error {e.response.status_code}: {e.response.text}"
-        await msg.update()
+        res = await authed_request("PUT", "/profile/contact", json=payload)
+        if res.status_code == 400:
+            msg.content = res.json().get("detail", "That change wasn't valid.")
+        else:
+            res.raise_for_status()
+            field = payload.get("field", "profile")
+            msg.content = f"✅ Your {field} has been updated."
     except Exception as e:
-        msg.content = f"Error: {e}"
-        await msg.update()
+        msg.content = f"Sorry, the update failed: {e}"
+    await msg.update()
+
+
+@cl.action_callback("cancel_profile")
+async def on_cancel_profile(action: cl.Action):
+    await action.remove()
+    await cl.Message(content="No changes made.").send()
+
+
+@cl.action_callback("confirm_order_cancel")
+async def on_confirm_order_cancel(action: cl.Action):
+    payload = action.payload or {}
+    await action.remove()
+    msg = cl.Message(content="Cancelling your order...")
+    await msg.send()
+    try:
+        res = await authed_request(
+            "POST",
+            "/chat/cancel-order",
+            json={"order_id": payload.get("order_id", "")},
+        )
+        if res.status_code == 409:
+            msg.content = res.json().get("detail", "That order could not be cancelled.")
+        else:
+            res.raise_for_status()
+            data = res.json()
+            msg.content = f"✅ {data['message']}"
+    except Exception as e:
+        msg.content = f"Sorry, the cancellation failed: {e}"
+    await msg.update()
+
+
+@cl.action_callback("dismiss_order_cancel")
+async def on_dismiss_order_cancel(action: cl.Action):
+    await action.remove()
+    await cl.Message(content="No changes made — your order is still active.").send()
 
 
 # ── Message handler ───────────────────────────────────────────────────────────
@@ -355,31 +525,15 @@ async def on_message(message: cl.Message):
         path = parts[1].strip()
         msg = cl.Message(content=f"Ingesting `{path}`...")
         await msg.send()
-        try:
-            data = await call_ingest(path)
-            msg.content = format_ingest_result(data)
-            await msg.update()
-        except FileNotFoundError:
-            msg.content = f"Path not found: `{path}`"
-            await msg.update()
-        except httpx.HTTPStatusError as e:
-            msg.content = f"API error {e.response.status_code}: {e.response.text}"
-            await msg.update()
-        except Exception as e:
-            msg.content = f"Error: {e}"
-            await msg.update()
+        await _run_ingest(msg, path)
 
     elif text == "/status":
         msg = cl.Message(content="Fetching ingestion history...")
         await msg.send()
         try:
-            async with httpx.AsyncClient() as client:
-                res = await client.get(
-                    f"{API_BASE}/admin/ingestion/status",
-                    headers={"Authorization": f"Bearer {get_token()}"},
-                )
-                res.raise_for_status()
-                runs = res.json()
+            res = await authed_request("GET", "/admin/ingestion/status")
+            res.raise_for_status()
+            runs = res.json()
 
             if not runs:
                 msg.content = "No ingestion runs found."

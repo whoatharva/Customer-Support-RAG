@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from app.routes.deps import verify_jwt
-from app.schemas import ChatRequest, ChatResponse, ChatHistoryResponse
+from app.schemas import ChatRequest, ChatResponse, RefundDecisionResponse, CancelOrderRequest, CancelOrderResponse
 from app.workflow.chat_workflow import run as workflow_run
-from app.helpers import database
-from app.helpers import session as mem
+from app.services import order_cancellation
+from app.pipelines.vision.verifier import SUPPORTED_MIME_TYPES
 from app.helpers.logger import get_logger
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -17,17 +17,52 @@ def chat(body: ChatRequest, user_email: str = Depends(verify_jwt)):
     return workflow_run(body, user_email=user_email)
 
 
-@router.get("/history/{session_id}", response_model=ChatHistoryResponse)
-def get_history(session_id: str, _: str = Depends(verify_jwt)):
-    """Return the full message history for a session from Supabase."""
-    messages = database.get_chat_history_db(session_id)
-    return ChatHistoryResponse(session_id=session_id, messages=messages)
+@router.post("/analyze-image", response_model=RefundDecisionResponse)
+async def analyze_image(
+    file: UploadFile = File(...),
+    session_id: str = Form(...),
+    claim: str = Form(...),
+    user_email: str = Depends(verify_jwt),
+):
+    """Run Pipeline 4: verify a refund claim from a product/package photo."""
+    from app.pipelines.vision.analyzer import process_refund_claim
+
+    mime_type = file.content_type or "image/jpeg"
+    if mime_type not in SUPPORTED_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported image type: {mime_type}. Use JPEG, PNG, or WebP.",
+        )
+
+    logger.info("POST /chat/analyze-image | session=%s user=%s file=%s", session_id, user_email, file.filename)
+    image_bytes = await file.read()
+
+    try:
+        result = await process_refund_claim(image_bytes, mime_type, claim, user_email, session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return RefundDecisionResponse(**result)
 
 
-@router.delete("/session/{session_id}")
-def clear_session(session_id: str, _: str = Depends(verify_jwt)):
-    """Delete all messages for a session from Supabase and in-memory store."""
-    database.delete_chat_session(session_id)
-    mem.clear(session_id)
-    logger.info("session cleared: %s", session_id)
-    return {"status": "cleared", "session_id": session_id}
+@router.post("/cancel-order", response_model=CancelOrderResponse)
+def cancel_order(body: CancelOrderRequest, user_email: str = Depends(verify_jwt)):
+    """Cancel an order if its current status allows it.
+
+    Business logic is handled entirely in order_cancellation (no LLM).
+    This endpoint is called by the Chainlit 'Confirm' button after the chat
+    service surfaced the confirmation prompt.
+    """
+    logger.info("POST /chat/cancel-order | order=%s user=%s", body.order_id, user_email)
+    result = order_cancellation.cancel_order(body.order_id, user_email)
+    if not result.success:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=result.message,
+        )
+    return CancelOrderResponse(
+        success=result.success,
+        order_id=result.order_id,
+        previous_status=result.previous_status,
+        message=result.message,
+    )

@@ -46,6 +46,33 @@ def _run(fn):
     return asyncio.to_thread(fn)
 
 
+async def _safe(fn, label: str, *, warn: bool = False, default=None):
+    """Run a zero-arg Supabase lambda in a thread; log and return `default` on failure.
+
+    Uses logger.warning when `warn` is True (writes we care about), else logger.debug.
+    """
+    try:
+        return await _run(fn)
+    except Exception:
+        (logger.warning if warn else logger.debug)("%s failed", label, exc_info=True)
+        return default
+
+
+async def _fetch_one(table: str, columns: str, label: str, **eq) -> Optional[dict]:
+    """SELECT `columns` FROM `table` WHERE all eq-filters match, LIMIT 1.
+
+    Returns the first row dict or None (also None on any DB error, logged at debug).
+    """
+    def _query():
+        q = get_db().table(table).select(columns)
+        for col, val in eq.items():
+            q = q.eq(col, val)
+        return q.limit(1).execute()
+
+    result = await _safe(_query, label)
+    return result.data[0] if result and result.data else None
+
+
 class SupabaseDataLayer(BaseDataLayer):
     """Chainlit BaseDataLayer implementation backed by our Supabase project."""
 
@@ -67,21 +94,17 @@ class SupabaseDataLayer(BaseDataLayer):
     async def create_user(self, user: User) -> Optional[PersistedUser]:
         # Look up the DB record to get the stable UUID, but copy metadata from
         # the original user so the session retains the token and role.
-        try:
-            result = await _run(
-                lambda: get_db().table("users").select("id, email, created_at")
-                    .eq("email", user.identifier).limit(1).execute()
+        row = await _fetch_one(
+            "users", "id, email, created_at", "create_user lookup",
+            email=user.identifier,
+        )
+        if row:
+            return PersistedUser(
+                id=str(row["id"]),
+                identifier=row["email"],
+                createdAt=str(row.get("created_at", _now())),
+                metadata=user.metadata,  # preserve token + role from auth_callback
             )
-            if result.data:
-                row = result.data[0]
-                return PersistedUser(
-                    id=str(row["id"]),
-                    identifier=row["email"],
-                    createdAt=str(row.get("created_at", _now())),
-                    metadata=user.metadata,  # preserve token + role from auth_callback
-                )
-        except Exception:
-            logger.debug("create_user lookup failed for %s", user.identifier, exc_info=True)
         # Fallback: return a minimal PersistedUser so the session is not blocked.
         return PersistedUser(
             id=user.identifier,
@@ -98,16 +121,60 @@ class SupabaseDataLayer(BaseDataLayer):
     async def delete_feedback(self, feedback_id: str) -> bool:
         return True
 
-    # ── Elements (file attachments) — stubbed ─────────────────────────────────
+    # ── Elements (file attachments) ───────────────────────────────────────────
 
     async def create_element(self, element) -> None:
-        pass
+        try:
+            await _run(lambda: get_db().table("cl_elements").upsert({
+                "id": element.id,
+                "thread_id": element.thread_id,
+                "type": getattr(element, "type", "file"),
+                "name": element.name or "",
+                "mime": element.mime or "",
+                "url": element.url or "",
+                "object_key": element.object_key or "",
+                "display": element.display or "inline",
+                "size": element.size,
+                "language": element.language or "",
+                "for_id": element.for_id or "",
+                "created_at": _now(),
+            }, on_conflict="id").execute())
+        except Exception:
+            logger.warning("create_element failed: %s", element.id, exc_info=True)
 
     async def get_element(self, thread_id: str, element_id: str):
+        try:
+            result = await _run(
+                lambda: get_db().table("cl_elements").select("*")
+                    .eq("id", element_id).eq("thread_id", thread_id).limit(1).execute()
+            )
+            if result.data:
+                r = result.data[0]
+                return {
+                    "id": r["id"],
+                    "threadId": r["thread_id"],
+                    "type": r.get("type", "file"),
+                    "name": r.get("name", ""),
+                    "mime": r.get("mime", ""),
+                    "url": r.get("url", ""),
+                    "objectKey": r.get("object_key", ""),
+                    "display": r.get("display", "inline"),
+                    "size": r.get("size"),
+                    "language": r.get("language", ""),
+                    "forId": r.get("for_id", ""),
+                }
+        except Exception:
+            logger.debug("get_element failed: %s / %s", thread_id, element_id, exc_info=True)
         return None
 
     async def delete_element(self, element_id: str, thread_id: Optional[str] = None) -> None:
-        pass
+        try:
+            q = get_db().table("cl_elements").delete().eq("id", element_id)
+            if thread_id:
+                q = q.eq("thread_id", thread_id)
+            await _run(lambda: q.execute())
+        except Exception:
+            logger.debug("delete_element failed: %s", element_id, exc_info=True)
 
     # ── Steps (individual messages) ───────────────────────────────────────────
 
@@ -182,26 +249,33 @@ class SupabaseDataLayer(BaseDataLayer):
 
         # Resolve email → DB UUID so list_threads filtering by UUID works
         if user_email and not user_uuid:
-            try:
-                res = await _run(
-                    lambda: get_db().table("users").select("id")
-                        .eq("email", user_email).limit(1).execute()
-                )
-                if res.data:
-                    user_uuid = str(res.data[0]["id"])
-            except Exception:
-                user_uuid = user_email  # fallback: store email as id
+            urow = await _fetch_one("users", "id", "update_thread uuid resolve", email=user_email)
+            user_uuid = str(urow["id"]) if urow else user_email  # fallback: store email as id
+
+        # Merge with the existing row: Chainlit calls update_thread multiple times
+        # per session (start, rename, disconnect) each passing only a subset of
+        # fields. A blind full-row upsert would reset the name to "New Conversation"
+        # and wipe session_id metadata. So only overwrite fields explicitly passed.
+        existing = await _fetch_one(
+            "cl_threads", "*", "update_thread existing-row read", id=thread_id,
+        ) or {}
+
+        # Treat an explicit "New Conversation" as "no name" — Chainlit's internal
+        # calls pass that default and would otherwise clobber a real title.
+        incoming_name = name if name and name != "New Conversation" else None
+
+        row = {
+            "id": thread_id,
+            "name": incoming_name or existing.get("name") or "New Conversation",
+            "user_identifier": user_email or existing.get("user_identifier"),
+            "user_id": user_uuid or existing.get("user_id"),
+            "metadata": {**(existing.get("metadata") or {}), **(metadata or {})},
+            "tags": tags if tags is not None else (existing.get("tags") or []),
+            "updated_at": _now(),
+        }
 
         try:
-            await _run(lambda: get_db().table("cl_threads").upsert({
-                "id": thread_id,
-                "name": name or "New Conversation",
-                "user_identifier": user_email,   # email — Chainlit auth check
-                "user_id": user_uuid,             # UUID  — list_threads filter
-                "metadata": metadata or {},
-                "tags": tags or [],
-                "updated_at": _now(),
-            }, on_conflict="id").execute())
+            await _run(lambda: get_db().table("cl_threads").upsert(row, on_conflict="id").execute())
         except Exception:
             logger.warning("update_thread failed: %s", thread_id, exc_info=True)
 
@@ -256,28 +330,6 @@ class SupabaseDataLayer(BaseDataLayer):
             )
         except Exception:
             logger.debug("delete_thread failed: %s", thread_id, exc_info=True)
-
-    async def find_thread_by_name(self, user_uuid: str, name: str, exclude_thread_id: str = "") -> Optional[dict]:
-        """Return {id, name} of an existing thread with this name for the user, or None.
-
-        Used to redirect the user directly to their existing invoice conversation
-        instead of opening a duplicate thread.
-        """
-        try:
-            result = await _run(
-                lambda: get_db().table("cl_threads")
-                    .select("id, name")
-                    .eq("user_id", user_uuid)
-                    .eq("name", name)
-                    .limit(5)
-                    .execute()
-            )
-            rows = result.data or []
-            others = [r for r in rows if r["id"] != exclude_thread_id]
-            return others[0] if others else None
-        except Exception:
-            logger.debug("find_thread_by_name check failed", exc_info=True)
-            return None
 
     async def list_threads(
         self, pagination: Pagination, filters: ThreadFilter

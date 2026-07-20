@@ -17,20 +17,11 @@ GATE 2 — Answer Relevancy Check (after LLM):
 """
 
 from app.llm import lightweight
+from app.llm.prompts import RELEVANCY_CHECK_PROMPT
 from app.config import settings
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
-
-_RELEVANCY_CHECK_PROMPT = """You are a strict relevancy judge for a customer support chatbot.
-
-Customer question: {query}
-
-Answer given: {answer}
-
-Does the answer directly address the customer's question?
-Reply with ONLY one word: "yes" or "no".
-""".strip()
 
 
 def retrieval_gate(results: list, has_direct_data: bool = False) -> bool:
@@ -83,7 +74,7 @@ def answer_relevancy_gate(query: str, answer: str) -> bool:
         True  → pass (answer is on-topic)
         False → block (answer is off-topic / evasive, should escalate)
     """
-    prompt = _RELEVANCY_CHECK_PROMPT.format(query=query, answer=answer[:500])
+    prompt = RELEVANCY_CHECK_PROMPT.format(query=query, answer=answer[:500])
     verdict = lightweight.call(prompt, max_tokens=5).lower()
 
     if not verdict:

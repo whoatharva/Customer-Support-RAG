@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, status
-from app.routes import auth, admin, chat
+from app.routes import auth, admin, chat, profile
 from app.config import settings
 from app.helpers.logger import configure_logging, get_logger
 
@@ -19,6 +19,7 @@ app = FastAPI(title="Customer Support RAG", version="0.1.0", lifespan=lifespan)
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
+app.include_router(profile.router, prefix="/api/v1")
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)

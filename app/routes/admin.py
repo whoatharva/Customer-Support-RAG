@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.routes.deps import verify_admin
 from app.schemas import IngestRequest, IngestResponse, IngestionStatusResponse, IngestError
 from app.helpers import database
-from app.pipelines.ingestion.indexer import run_ingestion
+from app.pipelines.ingestion.ingester import run_ingestion
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)

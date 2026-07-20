@@ -9,6 +9,7 @@ Tables managed here:
   customers        — customer profiles (loyalty, subscription, addresses)
   products         — product catalog (warranty, pricing, stock)
   orders           — order history with items/payment/logistics as JSONB
+  refund_requests  — refund verification outcomes (claim, decision, confidence)
 
 """
 
@@ -32,6 +33,11 @@ def get_db() -> Client:
         _client = create_client(settings.supabase_url, settings.supabase_key)
         logger.info("Supabase client initialized")
     return _client
+
+
+def first_row(result, default=None):
+    """First row of a Supabase query result, or `default` when empty."""
+    return result.data[0] if result.data else default
 
 
 # ── Documents ─────────────────────────────────────────────────────────────────
@@ -98,7 +104,7 @@ def create_user(name: str, email: str, password_hash: str) -> dict:
 
 def get_user_by_email(email: str) -> dict | None:
     result = get_db().table("users").select("*").eq("email", email).eq("is_active", True).execute()
-    return result.data[0] if result.data else None
+    return first_row(result)
 
 
 # ── Chat history ──────────────────────────────────────────────────────────────
@@ -122,19 +128,128 @@ def save_chat_message(session_id: str, role: str, content: str):
 
 
 def get_chat_history_db(session_id: str, limit: int = 50) -> list[dict]:
+    """Return the most recent `limit` messages, oldest first."""
     result = (
         get_db()
         .table("chat_messages")
         .select("role, content, created_at")
         .eq("session_id", session_id)
-        .order("created_at", desc=False)
+        .order("created_at", desc=True)
         .limit(limit)
         .execute()
     )
-    return result.data
+    return list(reversed(result.data))
 
 
-def delete_chat_session(session_id: str):
-    # chat_messages rows cascade-delete via FK
-    get_db().table("chat_sessions").delete().eq("id", session_id).execute()
-    logger.info("chat session deleted: %s", session_id)
+def persist_chat_turn(session_id: str, user_email: str, user_msg: str, assistant_msg: str):
+    """Best-effort: store one user/assistant exchange (never raises)."""
+    try:
+        ensure_chat_session(session_id, user_email)
+        save_chat_message(session_id, "user", user_msg)
+        save_chat_message(session_id, "assistant", assistant_msg)
+    except Exception:
+        logger.error("failed to persist chat turn | session=%s", session_id, exc_info=True)
+
+
+# ── Refund requests (Pipeline 4) ──────────────────────────────────────────────
+
+def create_refund_request(
+    user_email: str,
+    session_id: str,
+    claim: str,
+    verification,
+    decision: str,
+    decided_by: str,
+) -> dict:
+    """Persist a refund verification outcome. `verification` is a VerificationResult."""
+    row = {
+        "user_email": user_email,
+        "session_id": session_id,
+        "claim": claim,
+        "authentic": verification.authentic,
+        "issue_type": verification.issue_type,
+        "issue_matches_claim": verification.issue_matches_claim,
+        "confidence": verification.confidence,
+        "decision": decision,
+        "decided_by": decided_by,
+        "evidence": verification.evidence,
+    }
+    result = get_db().table("refund_requests").insert(row).execute()
+    logger.info("refund request saved | user=%s decision=%s by=%s", user_email, decision, decided_by)
+    return first_row(result, row)
+
+
+# ── Customers (self-service profile) ──────────────────────────────────────────
+
+# Fields a user is allowed to edit on their default address.
+ADDRESS_EDITABLE_FIELDS = ("line1", "line2", "city", "state", "pincode")
+
+
+def get_customer_full(email: str) -> dict | None:
+    """Full customer profile row (phone, addresses, loyalty, etc.) by email."""
+    result = (
+        get_db().table("customers").select("*").eq("email", email).limit(1).execute()
+    )
+    return first_row(result)
+
+
+def update_customer_phone(email: str, phone: str) -> dict:
+    """Set the customer's root phone number. Returns the updated row."""
+    try:
+        result = (
+            get_db().table("customers").update({"phone": phone})
+            .eq("email", email).execute()
+        )
+        logger.info("customer phone updated: %s", email)
+        return first_row(result, {})
+    except Exception:
+        logger.error("failed to update customer phone: %s", email, exc_info=True)
+        raise
+
+
+def update_customer_default_address(email: str, fields: dict) -> dict:
+    """Patch the customer's default (first saved) address.
+
+    Only keys in ADDRESS_EDITABLE_FIELDS are applied. The whole `addresses`
+    list is written back. Returns the updated row.
+    """
+    customer = get_customer_full(email)
+    if not customer:
+        raise ValueError(f"no customer for {email}")
+
+    addresses = customer.get("addresses") or []
+    patch = {k: v for k, v in fields.items() if k in ADDRESS_EDITABLE_FIELDS}
+    if addresses:
+        addresses[0] = {**addresses[0], **patch}
+    else:
+        addresses = [patch]
+
+    try:
+        result = (
+            get_db().table("customers").update({"addresses": addresses})
+            .eq("email", email).execute()
+        )
+        logger.info("customer default address updated: %s", email)
+        return first_row(result, {})
+    except Exception:
+        logger.error("failed to update customer address: %s", email, exc_info=True)
+        raise
+
+
+# ── Orders (self-service cancellation) ───────────────────────────────────────
+
+def cancel_order(order_id: str) -> dict:
+    """Set an order's status to 'Cancelled'. Returns the updated row."""
+    try:
+        result = (
+            get_db().table("orders")
+            .update({"status": "Cancelled"})
+            .eq("order_id", order_id)
+            .execute()
+        )
+        logger.info("order cancelled: %s", order_id)
+        return first_row(result, {})
+    except Exception:
+        logger.error("failed to cancel order: %s", order_id, exc_info=True)
+        raise
+

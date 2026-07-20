@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     jwt_expiry_minutes: int = 30
+    jwt_refresh_expiry_minutes: int = 60 * 24 * 7
     admin_username: str
     admin_password: str
 
@@ -32,6 +33,15 @@ class Settings(BaseSettings):
     # Lightweight LLM (HyDE + relevancy checks) — Gemini primary, Groq fallback
     gemini_api_key: str = ""
     groq_api_key: str = ""
+
+    # Vision pipeline (Groq multimodal)
+    groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    max_image_size_mb: int = 10
+
+    # Refund verification (Pipeline 4)
+    refund_auto_approve_threshold: float = 0.85   # confidence >= → auto-approve
+    refund_auto_reject_threshold: float = 0.40    # confidence <  → auto-reject
+    # confidence between the two thresholds → Human-in-the-Loop review
 
     # Logging
     log_level: str = "INFO"
