@@ -20,8 +20,8 @@ SUPPORTED_EXTENSIONS = {".md", ".pdf", ".docx"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
-def _mint_jwt(subject: str) -> str:
-    return encode_token(subject, settings.jwt_expiry_minutes, "access")
+def _mint_jwt(subject: str, role: str = "user") -> str:
+    return encode_token(subject, settings.jwt_expiry_minutes, "access", role=role)
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ async def auth_callback(username: str, password: str) -> cl.User | None:
     # Admin login — validated locally against config, then mint a JWT for API calls
     if username == settings.admin_username:
         if password == settings.admin_password:
-            token = _mint_jwt(settings.admin_username)
+            token = _mint_jwt(settings.admin_username, role="admin")
             return cl.User(identifier=username, metadata={"token": token, "role": "admin"})
         return None
 
@@ -75,7 +75,7 @@ async def _refresh_token() -> bool:
     meta = user.metadata
 
     if meta.get("role") == "admin":
-        meta["token"] = _mint_jwt(settings.admin_username)
+        meta["token"] = _mint_jwt(settings.admin_username, role="admin")
         cl.user_session.set("user", user)
         return True
 
