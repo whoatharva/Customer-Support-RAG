@@ -11,6 +11,7 @@ Flow:
 from app.schemas import ChatRequest, ChatResponse
 from app.pipelines.query.processor import process_query
 from app.pipelines.retrieval.retriever import generate_response
+from app.pipelines.query import gates
 from app.services import profile_service
 from app.services import order_cancellation
 from app.helpers import database
@@ -18,7 +19,7 @@ from app.helpers import order_lookup
 from app.helpers.text import contains_any
 from app.llm import lightweight
 from app.llm.parsing import parse_json_lenient
-from app.llm.prompts import SPLIT_PROMPT
+from app.llm.prompts import SPLIT_PROMPT, ESCALATION_ANSWER
 from app.helpers.langfuse import get_langfuse
 from app.helpers.logger import get_logger
 
@@ -232,6 +233,17 @@ def _run_rag(request: ChatRequest, user_email: str, query: str | None = None) ->
     decomposed multi-intent message; session_id/user_email are unchanged.
     """
     q = query or request.query
+
+    # ── Input scope gate: reject off-topic questions before any RAG cost ───────
+    if not gates.scope_gate(q):
+        logger.info("scope gate blocked — off-topic query, escalating without RAG")
+        return {
+            "answer": ESCALATION_ANSWER,
+            "citations": [],
+            "confidence": 0.0,
+            "should_escalate": True,
+        }
+
     langfuse = get_langfuse()
     trace = langfuse.trace(
         id=request.session_id,

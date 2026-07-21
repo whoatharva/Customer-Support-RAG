@@ -9,25 +9,6 @@ mocked in the tests themselves.
 
 import os
 
-# ── Hermetic env: set required settings to dummies (only if not already set) ──
-_DUMMY_ENV = {
-    "AZURE_OPENAI_API_KEY": "test-key",
-    "AZURE_OPENAI_ENDPOINT": "https://test.openai.azure.com",
-    "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-4.1",
-    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT": "text-embedding-3-small",
-    "QDRANT_URL": "http://localhost:6333",
-    "QDRANT_API_KEY": "test-qdrant",
-    "SUPABASE_URL": "http://localhost:54321",
-    "SUPABASE_KEY": "test-supabase",
-    "JWT_SECRET": "test-secret",
-    "ADMIN_USERNAME": "admin",
-    "ADMIN_PASSWORD": "admin",
-    "LANGFUSE_SECRET_KEY": "test-lf-secret",
-    "LANGFUSE_PUBLIC_KEY": "test-lf-public",
-}
-for _k, _v in _DUMMY_ENV.items():
-    os.environ.setdefault(_k, _v)
-
 import pytest
 
 

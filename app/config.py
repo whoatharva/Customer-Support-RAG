@@ -54,7 +54,6 @@ class Settings(BaseSettings):
     min_chunk_length: int = 50
 
     # Retrieval pipeline
-    retrieval_min_score: float = 0.35
     confidence_threshold: float = 0.5
     hyde_query_weight: float = 0.7
     hyde_vector_weight: float = 0.3

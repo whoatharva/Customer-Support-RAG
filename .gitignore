@@ -24,4 +24,4 @@ chainlit.md
 
 # Test caches
 .pytest_cache/
-
+.claude/
