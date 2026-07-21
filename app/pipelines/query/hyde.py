@@ -23,6 +23,7 @@ from app.llm import client as llm
 from app.llm import lightweight
 from app.llm.prompts import HYDE_PROMPT
 from app.config import settings
+from app.helpers.vector import blend_and_normalise
 from app.helpers.logger import get_logger
 
 logger = get_logger(__name__)
@@ -50,11 +51,9 @@ def get_blended_vector(query: str) -> list[float]:
     query_vector, hyde_vector = llm.embed([query, hypothetical_answer])
 
     # Step 3: blend and normalise
-    blended = [settings.hyde_query_weight * q + settings.hyde_vector_weight * h for q, h in zip(query_vector, hyde_vector)]
-    magnitude = sum(x * x for x in blended) ** 0.5
-    if magnitude == 0:
-        return query_vector
-    normalised = [x / magnitude for x in blended]
+    normalised = blend_and_normalise(
+        query_vector, hyde_vector, settings.hyde_query_weight, settings.hyde_vector_weight
+    )
 
     logger.debug("HyDE: blended vector produced (%.0f%% query + %.0f%% hypothetical)", settings.hyde_query_weight * 100, settings.hyde_vector_weight * 100)
     return normalised

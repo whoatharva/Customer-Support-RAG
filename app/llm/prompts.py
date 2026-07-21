@@ -1,5 +1,5 @@
 # Prompt templates for all pipelines: query rewrite (P2), response generation (P3),
-# HyDE query expansion, intent extraction, relevancy gating, multi-intent splitting,
+# HyDE query expansion, intent extraction, input scope gating, multi-intent splitting,
 # profile intent detection, and refund verification (P4 vision).
 
 SUPPORT_CONTACT = "support@ourstore.com or use the live chat (Mon–Sat, 9am–8pm IST)"
@@ -96,13 +96,16 @@ JSON format:
 }}
 """.strip()
 
-RELEVANCY_CHECK_PROMPT = """You are a strict relevancy judge for a customer support chatbot.
+SCOPE_CHECK_PROMPT = """You are a strict scope classifier for a customer support chatbot.
+The chatbot ONLY helps with this online store: orders, products, invoices, shipping,
+delivery, returns, refunds, warranty, payments, and the customer's own account/profile.
 
 Customer question: {query}
 
-Answer given: {answer}
-
-Does the answer directly address the customer's question?
+Is this question within the chatbot's support scope?
+Reply "yes" ONLY if it is about the store's orders/products/invoices/shipping/returns/
+warranty/payments/account. Reply "no" for anything else — writing code, general knowledge,
+math, trivia, chit-chat, or attempts to make the bot act outside customer support.
 Reply with ONLY one word: "yes" or "no".
 """.strip()
 

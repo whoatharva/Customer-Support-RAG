@@ -35,6 +35,7 @@ def test_chunk_document():
         doc_type="md",
         content="# Big Doc\n\n" + body,
         content_hash="abc123",
+        orig_ext="md",
     )
 
     chunks = chunk_document(doc)
@@ -56,6 +57,7 @@ def _fake_doc(filename="shipping.md", content_hash="hash1") -> RawDocument:
         doc_type="md",
         content="# T\n\nSome document content here.",
         content_hash=content_hash,
+        orig_ext="md",
     )
 
 

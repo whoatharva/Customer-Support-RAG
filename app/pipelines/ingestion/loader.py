@@ -14,6 +14,7 @@ class RawDocument:
     doc_type: str
     content: str
     content_hash: str
+    orig_ext: str
 
 
 def compute_hash(content: str) -> str:
@@ -24,16 +25,14 @@ def _parse_md(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _parse_pdf(path: Path) -> str:
-    import fitz
-    doc = fitz.open(str(path))
-    return "\n".join(page.get_text() for page in doc)
+def _to_markdown(path: Path) -> str:
+    """Convert a non-Markdown document (PDF, DOCX, …) to Markdown text.
 
-
-def _parse_docx(path: Path) -> str:
-    from docx import Document
-    doc = Document(str(path))
-    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    markitdown preserves headings/structure, so the converted output flows through
+    the header-aware markdown chunker instead of the flat generic splitter.
+    """
+    from markitdown import MarkItDown
+    return MarkItDown().convert(str(path)).text_content
 
 
 def load_documents(folder_path: str) -> tuple[list[RawDocument], list[dict]]:
@@ -56,12 +55,9 @@ def load_documents(folder_path: str) -> tuple[list[RawDocument], list[dict]]:
     for path in supported:
         try:
             ext = path.suffix.lower()
-            if ext == ".md":
-                content = _parse_md(path)
-            elif ext == ".pdf":
-                content = _parse_pdf(path)
-            elif ext == ".docx":
-                content = _parse_docx(path)
+            # .md is already Markdown; everything else is converted to Markdown so
+            # it flows through the header-aware markdown chunker.
+            content = _parse_md(path) if ext == ".md" else _to_markdown(path)
 
             if not content.strip():
                 errors.append({"file": path.name, "reason": "empty content after parsing"})
@@ -72,9 +68,10 @@ def load_documents(folder_path: str) -> tuple[list[RawDocument], list[dict]]:
             documents.append(RawDocument(
                 filepath=str(path),
                 filename=path.name,
-                doc_type=ext.lstrip("."),
+                doc_type="md",
                 content=content,
                 content_hash=compute_hash(content),
+                orig_ext=ext.lstrip("."),
             ))
         except Exception as e:
             logger.error("parse failed: %s — %s", path.name, e, exc_info=True)
